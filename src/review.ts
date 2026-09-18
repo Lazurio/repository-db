@@ -70,6 +70,18 @@ function sha256(value: string): string {
 	return `sha256:${createHash("sha256").update(value).digest("hex")}`;
 }
 
+/**
+ * Content of a path in the last published commit, or undefined when it did not
+ * exist there. App adapters need this to diff against the baseline without
+ * running Git themselves.
+ */
+export function readBaselineFile(
+	mountRoot: string,
+	relativePath: string,
+): string | undefined {
+	return headContent(mountRoot, relativePath);
+}
+
 /** Content of a path in HEAD, or undefined when it does not exist there. */
 function headContent(mountRoot: string, relativePath: string): string | undefined {
 	const result = runGit(mountRoot, ["show", `HEAD:${relativePath}`]);

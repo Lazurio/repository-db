@@ -98,6 +98,7 @@ export {
 	collectInputChanges,
 	computeReviewSnapshot,
 	globToRegExp,
+	readBaselineFile,
 	type ReviewOptions,
 } from "./review.ts";
 export {
