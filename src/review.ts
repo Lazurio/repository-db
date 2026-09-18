@@ -4,7 +4,13 @@ import path from "node:path";
 import { assertDataRepoBoundary } from "./boundary.ts";
 import { activeConflict } from "./conflict.ts";
 import { isPathDeclared, undeclaredGeneratedDiffs } from "./generated.ts";
-import { gitBatchShow, gitDirtyPaths, gitHeadCommit, runGit } from "./git.ts";
+import {
+	gitBatchShow,
+	gitDirtyPaths,
+	gitHeadCommit,
+	gitRenameSources,
+	runGit,
+} from "./git.ts";
 import { ENGINE_DIR } from "./lock.ts";
 import { computeDraftRevision } from "./draftRevision.ts";
 import { type DraftOriginRecord, resolveDraftOrigins } from "./origin.ts";
@@ -257,13 +263,25 @@ export function collectInputChanges(
 	config: RepositoryDbConfig,
 ): ReviewInputChange[] {
 	const baselineRef = reviewBaselineRef(mountRoot, config);
-	const dirtyPaths = gitDirtyPaths(mountRoot).filter(
-		(entry) => !entry.startsWith(`${ENGINE_DIR}/`),
-	);
+	// Git reports a rename by its new path only. The old path is a published
+	// record that the publish will delete, so it is listed too — otherwise the
+	// deletion would reach the remote without ever being shown.
+	const dirtyPaths = [
+		...gitDirtyPaths(mountRoot),
+		...gitRenameSources(mountRoot).values(),
+	].filter((entry) => !entry.startsWith(`${ENGINE_DIR}/`));
 	const committedPaths =
 		baselineRef === "HEAD"
 			? []
-			: runGit(mountRoot, ["diff", "--name-only", "-z", baselineRef, "HEAD"])
+			: runGit(mountRoot, [
+					"diff",
+					"--name-only",
+					// Both sides of a committed rename, for the same reason.
+					"--no-renames",
+					"-z",
+					baselineRef,
+					"HEAD",
+				])
 					.stdout.split("\0")
 					.filter(Boolean)
 					.filter((entry) => !entry.startsWith(`${ENGINE_DIR}/`));

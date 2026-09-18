@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { lstatSync, readFileSync, readlinkSync } from "node:fs";
 import path from "node:path";
+import { isPathDeclared } from "./generated.ts";
 import { gitDirtyPaths, gitHeadCommit } from "./git.ts";
 import { ENGINE_DIR } from "./lock.ts";
 import type { RepositoryDbConfig } from "./types.ts";
@@ -129,6 +130,9 @@ export function computeCanonicalContentHash(
 	const dirtyPaths = gitDirtyPaths(mountRoot)
 		.filter((entry) => !entry.startsWith(`${ENGINE_DIR}/`))
 		.filter((entry) => entry !== config.layout.generated)
-		.filter((entry) => !entry.startsWith(generatedPrefix));
+		.filter((entry) => !entry.startsWith(generatedPrefix))
+		// A declared artifact may live outside the generated layout; its
+		// materializer rewrites it just the same.
+		.filter((entry) => !isPathDeclared(entry, config));
 	return contentHash(mountRoot, dirtyPaths);
 }

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Review lists both sides of a rename — staged or committed but unsent — so the
+  deleted source record is shown before publish removes it.
+- The pre-staging comparison also excludes declared generated artifacts that
+  live outside the generated layout, so their materializer cannot make a
+  confirmed publish refuse itself.
+
 - Finishing a send requires the commit it finishes: `finishSendOnly` without a
   non-empty `expectedHead`, and `--finish-send` without `--head`, are refused
   before any fetch, lock or push. The card cannot offer the action until the

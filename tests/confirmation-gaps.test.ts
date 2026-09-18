@@ -592,3 +592,85 @@ describe("round 2 — the CLI demands the head too", () => {
 		}
 	});
 });
+
+describe("round 2 — a rename never hides the deleted record", () => {
+	test("a staged rename shows the old record as deleted", async () => {
+		const fixture = createFixtureRepo();
+		try {
+			const db = RepositoryDb.open(fixture.mountPath);
+			writeFixtureDocument(fixture.mountPath, "old-name", { name: "Published" });
+			publishBaseline(fixture);
+			git(fixture.mountPath, ["mv", "data/things/old-name.yaml", "data/things/new-name.yaml"]);
+
+			const snapshot = await db.review();
+			const kinds = new Map(
+				snapshot.resources.map((resource) => [
+					resource.changes[0]?.technicalRefs[0]?.path,
+					resource.changes[0]?.kind,
+				]),
+			);
+			expect(kinds.get("data/things/old-name.yaml")).toBe("deleted");
+			expect(kinds.get("data/things/new-name.yaml")).toBe("created");
+		} finally {
+			rmSync(fixture.root, { recursive: true, force: true });
+		}
+	});
+
+	test("a committed-but-unsent rename shows both sides too", async () => {
+		const fixture = createFixtureRepo();
+		try {
+			const db = RepositoryDb.open(fixture.mountPath);
+			writeFixtureDocument(fixture.mountPath, "old-name", { name: "Published" });
+			publishBaseline(fixture);
+			git(fixture.mountPath, ["mv", "data/things/old-name.yaml", "data/things/new-name.yaml"]);
+			git(fixture.mountPath, ["commit", "--message", "rename, never pushed"]);
+
+			const paths = (await db.review()).resources.map(
+				(resource) => resource.changes[0]?.technicalRefs[0]?.path,
+			);
+			expect(paths).toContain("data/things/old-name.yaml");
+			expect(paths).toContain("data/things/new-name.yaml");
+		} finally {
+			rmSync(fixture.root, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("round 2 — declared artifacts outside generated/ do not trip the check", () => {
+	test("a materializer writing under data/ does not refuse a confirmed publish", async () => {
+		const fixture = createFixtureRepo();
+		try {
+			const materializer =
+				"sh -c 'mkdir -p data/rollups && ls data/things | wc -l | tr -d \" \" > data/rollups/count.txt'";
+			writeFileSync(
+				path.join(fixture.mountPath, "repository-db.yaml"),
+				[
+					"schema_version: repository-db.config.v1",
+					"app: fixture",
+					`data_repo: {remote: ${fixture.originPath}, branch: ${fixture.branch}}`,
+					"schema: {name: fixture-data, version: 3.0.0-alpha.0}",
+					"layout: {data: data, generated: generated, scripts: scripts}",
+					"generated_manifest:",
+					"  - path: data/rollups/count.txt",
+					`    materializer: ${JSON.stringify(materializer)}`,
+					"validate: []",
+					"",
+				].join("\n"),
+				"utf8",
+			);
+			publishBaseline(fixture);
+
+			const db = RepositoryDb.open(fixture.mountPath);
+			writeFixtureDocument(fixture.mountPath, "new-record", { name: "New" });
+			const snapshot = await db.review();
+			const result = await db.publish({
+				actor: ACTOR,
+				source: "test",
+				expectedRevision: snapshot.draftRevision,
+			});
+			expect(result.state).toBe("published");
+		} finally {
+			rmSync(fixture.root, { recursive: true, force: true });
+		}
+	});
+});
