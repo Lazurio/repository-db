@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Add `canRevertRecords()` and let `readBaselineFile()` take an already resolved
+  baseline ref, so a review panel answers "can this be reverted" for a whole
+  draft with one set of Git reads instead of six per record.
+
 - The card's conflict state now carries the engine's own message and recovery
   handoff and offers the two real actions (abort, mark resolved) instead of one
   generic button the host had to implement itself.

@@ -78,9 +78,18 @@ function sha256(value: string): string {
 export function readBaselineFile(
 	mountRoot: string,
 	relativePath: string,
-	config?: RepositoryDbConfig,
+	/**
+	 * The baseline to read from. Pass the ref resolved once per request —
+	 * resolving it per path costs a `git merge-base` per record.
+	 */
+	baseline?: RepositoryDbConfig | string,
 ): string | undefined {
-	const ref = config ? reviewBaselineRef(mountRoot, config) : "HEAD";
+	const ref =
+		typeof baseline === "string"
+			? baseline
+			: baseline
+				? reviewBaselineRef(mountRoot, baseline)
+				: "HEAD";
 	return baselineContent(mountRoot, ref, relativePath);
 }
 
@@ -217,7 +226,7 @@ function toOrigin(record: DraftOriginRecord | undefined) {
  * commit that was made but never sent. It also keeps a colleague's newer
  * published commits out of the picture: those are not our changes to review.
  */
-function reviewBaselineRef(mountRoot: string, config: RepositoryDbConfig): string {
+export function reviewBaselineRef(mountRoot: string, config: RepositoryDbConfig): string {
 	const remoteBranch = `origin/${config.dataRepo.branch}`;
 	const mergeBase = runGit(mountRoot, ["merge-base", "HEAD", remoteBranch]);
 	if (mergeBase.status === 0 && mergeBase.stdout.trim()) return mergeBase.stdout.trim();
@@ -272,13 +281,12 @@ export function collectInputChanges(
 function genericResource(
 	mountRoot: string,
 	config: RepositoryDbConfig,
+	baselineRef: string,
 	input: ReviewInputChange,
 	maxFields: number | undefined,
 ): ReviewableResource {
 	const relativePath = input.technicalRefs[0]?.path ?? "";
-	const baseline = parseDocument(
-		baselineContent(mountRoot, reviewBaselineRef(mountRoot, config), relativePath),
-	);
+	const baseline = parseDocument(baselineContent(mountRoot, baselineRef, relativePath));
 	const draft = parseDocument(workingContent(mountRoot, relativePath));
 	// Either side failing to parse means the structural diff would be a lie, so
 	// the change degrades to technical evidence instead.
@@ -484,8 +492,11 @@ export async function computeReviewSnapshot(
 		}
 	}
 
+	const baselineRef = reviewBaselineRef(mountRoot, config);
 	for (const input of remaining.values()) {
-		resources.push(genericResource(mountRoot, config, input, options.maxFieldsPerChange));
+		resources.push(
+			genericResource(mountRoot, config, baselineRef, input, options.maxFieldsPerChange),
+		);
 	}
 
 	const snapshotLevel = worstLevel(resources.map((resource) => resource.fallback.activeLevel));

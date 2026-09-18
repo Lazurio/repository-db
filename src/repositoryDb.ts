@@ -12,6 +12,8 @@ import {
 	type DiscardResult,
 	discardDraft,
 	recordRevertAvailability,
+	recordRevertAvailabilityBatch,
+	type RevertAvailability,
 } from "./discard.ts";
 import { computeDraftRevision } from "./draftRevision.ts";
 import {
@@ -123,8 +125,13 @@ export class RepositoryDb {
 	}
 
 	/** Can this record be reverted on its own right now, and if not, why not? */
-	canRevertRecord(relativePath: string): { supported: boolean; reason?: string } {
+	canRevertRecord(relativePath: string): RevertAvailability {
 		return recordRevertAvailability(this.mountRoot, this.config, relativePath);
+	}
+
+	/** The same answer for a whole review panel, without re-reading Git per record. */
+	canRevertRecords(relativePaths: readonly string[]): Map<string, RevertAvailability> {
+		return recordRevertAvailabilityBatch(this.mountRoot, this.config, relativePaths);
 	}
 
 	/**

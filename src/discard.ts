@@ -135,6 +135,7 @@ function assertRecordRevertSupported(
 	config: RepositoryDbConfig,
 	relativePath: string,
 	dirtyPaths: readonly string[],
+	renameSources: Map<string, string> = gitRenameSources(mountRoot),
 ): void {
 	if (!dirtyPaths.includes(relativePath)) {
 		throw new RevertNotSupportedError(
@@ -167,7 +168,6 @@ function assertRecordRevertSupported(
 		);
 	}
 
-	const renameSources = gitRenameSources(mountRoot);
 	if (renameSources.has(relativePath) || [...renameSources.values()].includes(relativePath)) {
 		throw new RevertNotSupportedError(
 			"renamed_record",
@@ -255,6 +255,11 @@ export function discardDraft(
 	}
 }
 
+export interface RevertAvailability {
+	supported: boolean;
+	reason?: string;
+}
+
 /**
  * Can this record be reverted on its own right now? The panel asks before it
  * offers the action, so a user is never given a button that then refuses.
@@ -263,15 +268,53 @@ export function recordRevertAvailability(
 	mountRoot: string,
 	config: RepositoryDbConfig,
 	relativePath: string,
-): { supported: boolean; reason?: string } {
+): RevertAvailability {
+	return recordRevertAvailabilityBatch(mountRoot, config, [relativePath]).get(relativePath) ?? {
+		supported: false,
+		reason: "Unknown record.",
+	};
+}
+
+/**
+ * The same answer for many records at once.
+ *
+ * A review panel asks about every record it is about to draw, and each answer
+ * needs the same three Git reads — ahead/behind, the dirty set, rename
+ * detection. Asking per record turns a status poll into a subprocess storm on a
+ * large draft, so the shared work happens once here.
+ */
+export function recordRevertAvailabilityBatch(
+	mountRoot: string,
+	config: RepositoryDbConfig,
+	relativePaths: readonly string[],
+): Map<string, RevertAvailability> {
+	const results = new Map<string, RevertAvailability>();
+	if (relativePaths.length === 0) return results;
+
+	// One shared guard check: if the whole checkout cannot be discarded from,
+	// no record can, and the reason is the same for all of them.
 	try {
 		assertDiscardable(mountRoot, config);
-		assertRecordRevertSupported(mountRoot, config, relativePath, dirtyPathsOf(mountRoot));
-		return { supported: true };
 	} catch (error) {
-		return {
-			supported: false,
-			reason: error instanceof Error ? error.message : String(error),
-		};
+		const reason = error instanceof Error ? error.message : String(error);
+		for (const relativePath of relativePaths) {
+			results.set(relativePath, { supported: false, reason });
+		}
+		return results;
 	}
+
+	const dirtyPaths = dirtyPathsOf(mountRoot);
+	const renameSources = gitRenameSources(mountRoot);
+	for (const relativePath of relativePaths) {
+		try {
+			assertRecordRevertSupported(mountRoot, config, relativePath, dirtyPaths, renameSources);
+			results.set(relativePath, { supported: true });
+		} catch (error) {
+			results.set(relativePath, {
+				supported: false,
+				reason: error instanceof Error ? error.message : String(error),
+			});
+		}
+	}
+	return results;
 }

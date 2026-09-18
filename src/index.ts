@@ -74,6 +74,8 @@ export * from "./types.ts";
 export {
 	discardDraft,
 	recordRevertAvailability,
+	recordRevertAvailabilityBatch,
+	type RevertAvailability,
 	DraftChangedError,
 	RevertNotSupportedError,
 	type DiscardOptions,
@@ -99,6 +101,7 @@ export {
 	computeReviewSnapshot,
 	globToRegExp,
 	readBaselineFile,
+	reviewBaselineRef,
 	type ReviewOptions,
 } from "./review.ts";
 export {
