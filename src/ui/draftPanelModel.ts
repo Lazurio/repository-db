@@ -173,7 +173,9 @@ export function deriveDraftPanel(input: DraftPanelInput): DraftPanelModel {
 			pill: "Čeká na odeslání",
 			count,
 			headline:
-				"Změny jsou uložené jako publikace, ale nedorazily na server. Zbývá dokončit odeslání.",
+				count > 0
+					? `Publikace ${count === 1 ? "jedné změny" : `${count} změn`} je uložená, ale nedorazila na server. Zbývá dokončit odeslání.`
+					: "Publikace je uložená, ale nedorazila na server. Zbývá dokončit odeslání.",
 			actions: [
 				{ kind: "finish_send", label: "Dokončit odeslání", enabled: true },
 				{

@@ -78,13 +78,19 @@ function sha256(value: string): string {
 export function readBaselineFile(
 	mountRoot: string,
 	relativePath: string,
+	config?: RepositoryDbConfig,
 ): string | undefined {
-	return headContent(mountRoot, relativePath);
+	const ref = config ? reviewBaselineRef(mountRoot, config) : "HEAD";
+	return baselineContent(mountRoot, ref, relativePath);
 }
 
-/** Content of a path in HEAD, or undefined when it does not exist there. */
-function headContent(mountRoot: string, relativePath: string): string | undefined {
-	const result = runGit(mountRoot, ["show", `HEAD:${relativePath}`]);
+/** Content of a path at a given commit, or undefined when it was not there. */
+function baselineContent(
+	mountRoot: string,
+	ref: string,
+	relativePath: string,
+): string | undefined {
+	const result = runGit(mountRoot, ["show", `${ref}:${relativePath}`]);
 	return result.status === 0 ? result.stdout : undefined;
 }
 
@@ -202,19 +208,49 @@ function toOrigin(record: DraftOriginRecord | undefined) {
 	};
 }
 
-/** Raw change rows for the current dirty set, before any app enrichment. */
+/**
+ * Baseline for the review: the last commit this checkout shares with the
+ * published branch.
+ *
+ * Using the merge base rather than HEAD means the review answers one question
+ * — "what here is not published yet" — for both an ordinary draft and a
+ * commit that was made but never sent. It also keeps a colleague's newer
+ * published commits out of the picture: those are not our changes to review.
+ */
+function reviewBaselineRef(mountRoot: string, config: RepositoryDbConfig): string {
+	const remoteBranch = `origin/${config.dataRepo.branch}`;
+	const mergeBase = runGit(mountRoot, ["merge-base", "HEAD", remoteBranch]);
+	if (mergeBase.status === 0 && mergeBase.stdout.trim()) return mergeBase.stdout.trim();
+	// No upstream yet (fresh data repo): everything committed is still unsent,
+	// but there is nothing to compare against, so HEAD is the honest baseline.
+	return "HEAD";
+}
+
+/** Everything not yet published: committed-but-unsent changes and the dirty set. */
 export function collectInputChanges(
 	mountRoot: string,
 	config: RepositoryDbConfig,
 ): ReviewInputChange[] {
-	const dirtyPaths = gitDirtyPaths(mountRoot)
-		.filter((entry) => !entry.startsWith(`${ENGINE_DIR}/`))
-		.sort();
+	const baselineRef = reviewBaselineRef(mountRoot, config);
+	const dirtyPaths = gitDirtyPaths(mountRoot).filter(
+		(entry) => !entry.startsWith(`${ENGINE_DIR}/`),
+	);
+	const committedPaths =
+		baselineRef === "HEAD"
+			? []
+			: runGit(mountRoot, ["diff", "--name-only", baselineRef, "HEAD"])
+					.stdout.split("\n")
+					.filter(Boolean)
+					.filter((entry) => !entry.startsWith(`${ENGINE_DIR}/`));
+
+	const unpublishedPaths = [...new Set([...committedPaths, ...dirtyPaths])].sort();
 	const origins = resolveDraftOrigins(mountRoot, dirtyPaths);
 
-	return dirtyPaths.map((relativePath) => {
+	return unpublishedPaths.map((relativePath) => {
 		const refKind = technicalRefKind(relativePath, config);
-		const baseline = headContent(mountRoot, relativePath);
+		const baseline = baselineContent(mountRoot, baselineRef, relativePath);
+		// The working tree is the current truth in both cases: a committed change
+		// is also present there, so one read covers both.
 		const draft = workingContent(mountRoot, relativePath);
 		const kind = changeKindOf(baseline, draft, refKind === "generated_path");
 		return {
@@ -240,7 +276,9 @@ function genericResource(
 	maxFields: number | undefined,
 ): ReviewableResource {
 	const relativePath = input.technicalRefs[0]?.path ?? "";
-	const baseline = parseDocument(headContent(mountRoot, relativePath));
+	const baseline = parseDocument(
+		baselineContent(mountRoot, reviewBaselineRef(mountRoot, config), relativePath),
+	);
 	const draft = parseDocument(workingContent(mountRoot, relativePath));
 	// Either side failing to parse means the structural diff would be a lie, so
 	// the change degrades to technical evidence instead.

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- `review()` now reports everything that is not published yet, not only the
+  dirty working tree: a publish that committed but never reached the server
+  stays visible and reviewable instead of disappearing from the card. The
+  baseline is the last commit shared with the published branch, so a colleague's
+  newer published commits are never reported as our changes.
+
 - Add the shared Draft & Publish card under the `@lazurio/repository-db/ui`
   subpath: a pure view model (`deriveDraftPanel`) plus a React panel every v3
   app renders instead of its own. React is an optional peer dependency, so the

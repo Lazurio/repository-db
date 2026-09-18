@@ -10,7 +10,7 @@ import {
 	type ReviewSurfaceAdapter,
 	type ReviewableResource,
 } from "../src/types.ts";
-import { createFixtureRepo, git, writeFixtureDocument } from "./fixtures.ts";
+import { cloneFixture, createFixtureRepo, git, writeFixtureDocument } from "./fixtures.ts";
 
 const ANNA = "Anna <anna@example.com>";
 const AGENT = "Henry <agent@example.com>";
@@ -86,6 +86,7 @@ describe("review surface engine", () => {
 			});
 			git(fixture.mountPath, ["add", "--all"]);
 			git(fixture.mountPath, ["commit", "--message", "baseline"]);
+			git(fixture.mountPath, ["push", "--quiet", "origin", fixture.branch]);
 
 			writeFixtureDocument(fixture.mountPath, "beta", {
 				name: "Beta",
@@ -250,6 +251,7 @@ describe("review surface engine", () => {
 			writeFixtureDocument(fixture.mountPath, "delta", { name: "Delta" });
 			git(fixture.mountPath, ["add", "--all"]);
 			git(fixture.mountPath, ["commit", "--message", "baseline"]);
+			git(fixture.mountPath, ["push", "--quiet", "origin", fixture.branch]);
 
 			// The record still exists, its draft is just not valid YAML right now.
 			writeFileSync(
@@ -369,5 +371,64 @@ describe("glob matching", () => {
 		expect(globToRegExp("data/thing-?.yaml").test("data/thing-12.yaml")).toBe(false);
 		// A literal dot must not act as a wildcard.
 		expect(globToRegExp("data/a.yaml").test("data/axyaml")).toBe(false);
+	});
+});
+
+describe("review — unpublished, not just dirty", () => {
+	test("keeps a committed-but-unsent change visible", async () => {
+		const fixture = createFixtureRepo();
+		try {
+			const db = RepositoryDb.open(fixture.mountPath);
+			writeFixtureDocument(fixture.mountPath, "epsilon", {
+				name: "Epsilon",
+				status: "interested",
+			});
+			git(fixture.mountPath, ["add", "--all"]);
+			git(fixture.mountPath, ["commit", "--message", "baseline"]);
+			git(fixture.mountPath, ["push", "--quiet", "origin", fixture.branch]);
+
+			// A publish that committed but never reached the remote.
+			writeFixtureDocument(fixture.mountPath, "epsilon", {
+				name: "Epsilon",
+				status: "price_offer",
+			});
+			git(fixture.mountPath, ["add", "--all"]);
+			git(fixture.mountPath, ["commit", "--message", "publish that failed to push"]);
+
+			expect(db.status().state).toBe("committed_not_pushed");
+			const snapshot = await db.review();
+
+			// The user can still see what is waiting to be sent.
+			expect(snapshot.resources).toHaveLength(1);
+			const fields = snapshot.resources[0]?.changes[0]?.fields ?? [];
+			expect(fields[0]?.fieldPath).toBe("/record/status");
+			expect(fields[0]?.afterSummary).toBe("price_offer");
+		} finally {
+			rmSync(fixture.root, { recursive: true, force: true });
+		}
+	});
+
+	test("does not report a colleague's newer published commits as our changes", async () => {
+		const fixture = createFixtureRepo();
+		try {
+			const db = RepositoryDb.open(fixture.mountPath);
+			writeFixtureDocument(fixture.mountPath, "shared", { name: "Shared" });
+			git(fixture.mountPath, ["add", "--all"]);
+			git(fixture.mountPath, ["commit", "--message", "baseline"]);
+			git(fixture.mountPath, ["push", "--quiet", "origin", fixture.branch]);
+
+			// Someone else publishes; we fetch but have not integrated it.
+			const second = cloneFixture(fixture);
+			writeFixtureDocument(second, "theirs", { name: "Theirs" });
+			git(second, ["add", "--all"]);
+			git(second, ["commit", "--message", "their publish"]);
+			git(second, ["push", "--quiet", "origin", fixture.branch]);
+			git(fixture.mountPath, ["fetch", "--quiet", "origin"]);
+
+			const snapshot = await db.review();
+			expect(snapshot.resources).toEqual([]);
+		} finally {
+			rmSync(fixture.root, { recursive: true, force: true });
+		}
 	});
 });
