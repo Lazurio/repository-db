@@ -295,6 +295,64 @@ export async function gitFetchAsync(
 	});
 }
 
+/**
+ * Read many blobs from one commit in a single git process.
+ *
+ * A review reads the published version of every changed record. Doing that with
+ * one `git show` per record is one subprocess per record — fine for three
+ * changes, a stalled request for a bulk agent edit. `cat-file --batch` answers
+ * the whole list from one process instead.
+ *
+ * Returns a map keyed by the requested path; a path absent from the commit maps
+ * to `undefined`, which is how a newly created record looks.
+ */
+export function gitBatchShow(
+	repoRoot: string,
+	ref: string,
+	relativePaths: readonly string[],
+): Map<string, string | undefined> {
+	const result = new Map<string, string | undefined>();
+	if (relativePaths.length === 0) return result;
+
+	const request = spawnSync("git", ["-C", repoRoot, "cat-file", "--batch"], {
+		input: `${relativePaths.map((entry) => `${ref}:${entry}`).join("\n")}\n`,
+		maxBuffer: 256 * 1024 * 1024,
+		env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+	});
+	if (request.error) {
+		throw new RepositoryDbError(
+			"git_unavailable",
+			`git could not be executed: ${request.error.message}`,
+		);
+	}
+	const stdout: Buffer = request.stdout ?? Buffer.alloc(0);
+
+	// Responses come back in request order: either "<oid> <type> <size>\n<bytes>\n"
+	// or "<object> missing\n".
+	let cursor = 0;
+	for (const relativePath of relativePaths) {
+		const newline = stdout.indexOf(0x0a, cursor);
+		if (newline === -1) {
+			result.set(relativePath, undefined);
+			continue;
+		}
+		const header = stdout.subarray(cursor, newline).toString("utf8");
+		cursor = newline + 1;
+		if (header.endsWith(" missing")) {
+			result.set(relativePath, undefined);
+			continue;
+		}
+		const size = Number(header.split(" ").at(-1));
+		if (!Number.isFinite(size)) {
+			result.set(relativePath, undefined);
+			continue;
+		}
+		result.set(relativePath, stdout.subarray(cursor, cursor + size).toString("utf8"));
+		cursor += size + 1; // trailing newline after the blob
+	}
+	return result;
+}
+
 export function gitHeadCommit(repoRoot: string): string | undefined {
 	const result = runGit(repoRoot, ["rev-parse", "HEAD"]);
 	if (result.status !== 0) return undefined;

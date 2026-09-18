@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Read every record's published version with one `git cat-file --batch` process
+  instead of one `git show` per record. A 150-record draft reviews in ~0.3 s
+  instead of ~1.4 s, and the cost no longer grows with the number of changes.
+
 - `ReviewInputChange` now carries the baseline content the engine already read,
   so an app adapter can diff against the published version without a second
   `git show` per record.

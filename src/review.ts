@@ -4,7 +4,7 @@ import path from "node:path";
 import { assertDataRepoBoundary } from "./boundary.ts";
 import { activeConflict } from "./conflict.ts";
 import { isPathDeclared, undeclaredGeneratedDiffs } from "./generated.ts";
-import { gitDirtyPaths, gitHeadCommit, runGit } from "./git.ts";
+import { gitBatchShow, gitDirtyPaths, gitHeadCommit, runGit } from "./git.ts";
 import { ENGINE_DIR } from "./lock.ts";
 import { type DraftOriginRecord, resolveDraftOrigins } from "./origin.ts";
 import { structuralDiff } from "./structuralDiff.ts";
@@ -254,10 +254,12 @@ export function collectInputChanges(
 
 	const unpublishedPaths = [...new Set([...committedPaths, ...dirtyPaths])].sort();
 	const origins = resolveDraftOrigins(mountRoot, dirtyPaths);
+	// One git process for every baseline, instead of one per record.
+	const baselines = gitBatchShow(mountRoot, baselineRef, unpublishedPaths);
 
 	return unpublishedPaths.map((relativePath) => {
 		const refKind = technicalRefKind(relativePath, config);
-		const baseline = baselineContent(mountRoot, baselineRef, relativePath);
+		const baseline = baselines.get(relativePath);
 		// The working tree is the current truth in both cases: a committed change
 		// is also present there, so one read covers both.
 		const draft = workingContent(mountRoot, relativePath);
@@ -282,12 +284,13 @@ export function collectInputChanges(
 function genericResource(
 	mountRoot: string,
 	config: RepositoryDbConfig,
-	baselineRef: string,
 	input: ReviewInputChange,
 	maxFields: number | undefined,
 ): ReviewableResource {
 	const relativePath = input.technicalRefs[0]?.path ?? "";
-	const baseline = parseDocument(baselineContent(mountRoot, baselineRef, relativePath));
+	// The baseline was already read when the change was collected; reading it
+	// again here would put a git process back on the per-record path.
+	const baseline = parseDocument(input.baselineText);
 	const draft = parseDocument(workingContent(mountRoot, relativePath));
 	// Either side failing to parse means the structural diff would be a lie, so
 	// the change degrades to technical evidence instead.
@@ -493,11 +496,8 @@ export async function computeReviewSnapshot(
 		}
 	}
 
-	const baselineRef = reviewBaselineRef(mountRoot, config);
 	for (const input of remaining.values()) {
-		resources.push(
-			genericResource(mountRoot, config, baselineRef, input, options.maxFieldsPerChange),
-		);
+		resources.push(genericResource(mountRoot, config, input, options.maxFieldsPerChange));
 	}
 
 	const snapshotLevel = worstLevel(resources.map((resource) => resource.fallback.activeLevel));
