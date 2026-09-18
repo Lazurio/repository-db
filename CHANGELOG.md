@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Add the shared Draft & Publish card under the `@lazurio/repository-db/ui`
+  subpath: a pure view model (`deriveDraftPanel`) plus a React panel every v3
+  app renders instead of its own. React is an optional peer dependency, so the
+  engine itself stays framework-free for server and agent callers.
+
 - Implement the two engine primitives the Draft & Publish standard requires.
   `review()` resolves the current draft into resources with business labels,
   app routes and structural before/after field summaries, degrading to a generic

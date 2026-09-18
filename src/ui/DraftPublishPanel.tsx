@@ -1,0 +1,311 @@
+import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+	type DraftPanelInput,
+	type DraftPanelModel,
+	type DraftPanelRecord,
+	deriveDraftPanel,
+} from "./draftPanelModel.ts";
+
+/**
+ * The shared Draft & Publish card.
+ *
+ * Every repository-db-backed v3 app renders this same component, so the state
+ * priority, the wording and the confirmation behaviour cannot drift between
+ * apps. The app supplies only three things: how to load the review, and how to
+ * publish and discard. Business labels and routes come from its review adapter,
+ * which the engine has already applied by the time the data arrives here.
+ *
+ * Styling is class-name based (`rdb-draft-*`) so each app keeps its own look
+ * without forking the behaviour.
+ */
+
+export interface DraftPublishPanelApi {
+	/** GET the current review; must include the draft revision. */
+	loadReview(): Promise<DraftPanelInput>;
+	/** Publish the whole draft, confirming the displayed revision. */
+	publish(expectedRevision: string): Promise<void>;
+	/** Discard one record or the whole draft, confirming the displayed revision. */
+	discard(
+		scope: { kind: "draft" } | { kind: "record"; path: string },
+		expectedRevision: string,
+	): Promise<void>;
+	/** Finish sending an already committed publish. */
+	finishSend?(): Promise<void>;
+	/** Pull newer published data. */
+	pull?(): Promise<void>;
+	/** Open the app's conflict recovery surface. */
+	resolveConflict?(): void;
+}
+
+export interface DraftPublishPanelProps {
+	api: DraftPublishPanelApi;
+	/** Poll interval in ms; an app with live events can pass a large number. */
+	pollIntervalMs?: number;
+	/** Subscribe to app events that mean "the draft moved"; returns unsubscribe. */
+	subscribe?(onChange: () => void): () => void;
+	/** Follow a record route; defaults to setting window.location.hash. */
+	onOpenRecord?(href: string): void;
+}
+
+const DEFAULT_POLL_MS = 30_000;
+
+function RecordRow({
+	record,
+	busy,
+	onOpen,
+	onRevert,
+}: {
+	record: DraftPanelRecord;
+	busy: boolean;
+	onOpen(href: string): void;
+	onRevert(record: DraftPanelRecord): void;
+}) {
+	const [showTechnical, setShowTechnical] = useState(false);
+	return (
+		<li className={`rdb-draft-record rdb-draft-origin-${record.originKind}`}>
+			<div className="rdb-draft-record-head">
+				<span className="rdb-draft-chip">{record.changeLabel}</span>
+				<span className="rdb-draft-type">{record.typeLabel}</span>
+				<strong className="rdb-draft-label">{record.label}</strong>
+				<span className="rdb-draft-origin" title="Odkud změna přišla">
+					{record.originLabel}
+				</span>
+			</div>
+			<p className="rdb-draft-summary">{record.summary}</p>
+			{record.fields.length > 0 && (
+				<ul className="rdb-draft-fields">
+					{record.fields.map((field) => (
+						<li key={field.label}>
+							<span className="rdb-draft-field-label">{field.label}</span>
+							<span className="rdb-draft-before">{field.before}</span>
+							<span className="rdb-draft-arrow" aria-hidden="true">
+								→
+							</span>
+							<span className="rdb-draft-after">{field.after}</span>
+						</li>
+					))}
+				</ul>
+			)}
+			<div className="rdb-draft-record-actions">
+				{record.href && (
+					<button type="button" onClick={() => onOpen(record.href as string)}>
+						{record.openLabel}
+					</button>
+				)}
+				{record.revertSupported ? (
+					<button
+						type="button"
+						className="rdb-draft-revert"
+						disabled={busy}
+						onClick={() => onRevert(record)}
+					>
+						Vrátit změnu
+					</button>
+				) : (
+					// Not a disabled button with a mystery: the reason is the text.
+					<span className="rdb-draft-revert-blocked">{record.revertBlockedReason}</span>
+				)}
+				<button
+					type="button"
+					className="rdb-draft-technical-toggle"
+					onClick={() => setShowTechnical((value) => !value)}
+				>
+					{showTechnical ? "Skrýt detail" : "Technický detail"}
+				</button>
+			</div>
+			{showTechnical && <code className="rdb-draft-technical">{record.technicalPath}</code>}
+		</li>
+	);
+}
+
+export function DraftPublishPanel({
+	api,
+	pollIntervalMs = DEFAULT_POLL_MS,
+	subscribe,
+	onOpenRecord,
+}: DraftPublishPanelProps) {
+	const [input, setInput] = useState<DraftPanelInput | null>(null);
+	const [open, setOpen] = useState(false);
+	const [busy, setBusy] = useState(false);
+	const [message, setMessage] = useState<{ text: string; tone: "info" | "error" } | null>(null);
+	const [available, setAvailable] = useState(true);
+
+	const refresh = useCallback(async () => {
+		try {
+			setInput(await api.loadReview());
+			setAvailable(true);
+		} catch {
+			// No mounted data checkout: stay silent rather than shout an error.
+			setAvailable(false);
+		}
+	}, [api]);
+
+	useEffect(() => {
+		void refresh();
+		const timer = setInterval(() => void refresh(), pollIntervalMs);
+		const unsubscribe = subscribe?.(() => void refresh());
+		return () => {
+			clearInterval(timer);
+			unsubscribe?.();
+		};
+	}, [refresh, pollIntervalMs, subscribe]);
+
+	const model: DraftPanelModel | null = useMemo(
+		() => (input ? deriveDraftPanel(input) : null),
+		[input],
+	);
+
+	const run = useCallback(
+		async (action: () => Promise<void>, successText: string) => {
+			setBusy(true);
+			setMessage(null);
+			try {
+				await action();
+				setMessage({ text: successText, tone: "info" });
+			} catch (error) {
+				const code = (error as { code?: string })?.code;
+				setMessage({
+					text:
+						code === "draft_changed"
+							? "Mezitím se rozpracované změny změnily. Nic jsme neprovedli — zkontrolujte je znovu."
+							: error instanceof Error
+								? error.message
+								: String(error),
+					tone: "error",
+				});
+			} finally {
+				setBusy(false);
+				await refresh();
+			}
+		},
+		[refresh],
+	);
+
+	const openRecord = useCallback(
+		(href: string) => {
+			if (onOpenRecord) onOpenRecord(href);
+			else if (typeof window !== "undefined") window.location.hash = href.replace(/^#/, "");
+		},
+		[onOpenRecord],
+	);
+
+	const revertRecord = useCallback(
+		(record: DraftPanelRecord) => {
+			if (!model) return;
+			if (
+				typeof window !== "undefined" &&
+				!window.confirm(`Vrátit změnu záznamu "${record.label}" na publikovanou verzi?`)
+			) {
+				return;
+			}
+			void run(
+				() =>
+					api.discard({ kind: "record", path: record.technicalPath }, model.revision),
+				`Změna záznamu "${record.label}" byla vrácena.`,
+			);
+		},
+		[api, model, run],
+	);
+
+	const runAction = useCallback(
+		(kind: string) => {
+			if (!model) return;
+			if (kind === "publish") {
+				void run(() => api.publish(model.revision), "Publikováno.");
+				return;
+			}
+			if (kind === "discard_draft") {
+				if (
+					typeof window !== "undefined" &&
+					!window.confirm(
+						`Zahodit všechny rozpracované změny (${model.count})? Vrátí se poslední publikovaná verze.`,
+					)
+				) {
+					return;
+				}
+				void run(
+					() => api.discard({ kind: "draft" }, model.revision),
+					"Rozpracované změny byly zahozené.",
+				);
+				return;
+			}
+			if (kind === "finish_send" && api.finishSend) {
+				void run(() => api.finishSend?.() ?? Promise.resolve(), "Odesláno.");
+				return;
+			}
+			if (kind === "pull" && api.pull) {
+				void run(() => api.pull?.() ?? Promise.resolve(), "Staženo.");
+				return;
+			}
+			if (kind === "resolve_conflict") api.resolveConflict?.();
+		},
+		[api, model, run],
+	);
+
+	if (!available || !model?.visible) return null;
+
+	return (
+		<section
+			className={`rdb-draft-card rdb-draft-${model.tone}${open ? " rdb-draft-open" : ""}`}
+			aria-label="Rozpracované změny a publikace"
+		>
+			<button
+				type="button"
+				className="rdb-draft-pill"
+				aria-expanded={open}
+				onClick={() => setOpen((value) => !value)}
+			>
+				<span className="rdb-draft-dot" aria-hidden="true" />
+				<span>{model.pill}</span>
+				{model.count > 0 && <span className="rdb-draft-count">{model.count}</span>}
+			</button>
+
+			{open && (
+				<div className="rdb-draft-body">
+					<p className="rdb-draft-headline">{model.headline}</p>
+					{model.wholeDraftNote && (
+						<p className="rdb-draft-note">{model.wholeDraftNote}</p>
+					)}
+					{model.ownerNote && <p className="rdb-draft-owner">{model.ownerNote}</p>}
+					{message && (
+						<p className={`rdb-draft-message rdb-draft-message-${message.tone}`} role="status">
+							{message.text}
+						</p>
+					)}
+
+					{model.records.length > 0 && (
+						<ul className="rdb-draft-records">
+							{model.records.map((record) => (
+								<RecordRow
+									key={record.id}
+									record={record}
+									busy={busy}
+									onOpen={openRecord}
+									onRevert={revertRecord}
+								/>
+							))}
+						</ul>
+					)}
+
+					<div className="rdb-draft-actions">
+						{model.actions.map((action) => (
+							<span key={action.kind} className="rdb-draft-action">
+								<button
+									type="button"
+									className={action.destructive ? "rdb-draft-destructive" : undefined}
+									disabled={!action.enabled || busy}
+									onClick={() => runAction(action.kind)}
+								>
+									{action.label}
+								</button>
+								{!action.enabled && action.disabledReason && (
+									<small className="rdb-draft-disabled-reason">{action.disabledReason}</small>
+								)}
+							</span>
+						))}
+					</div>
+				</div>
+			)}
+		</section>
+	);
+}
