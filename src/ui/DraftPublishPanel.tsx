@@ -37,8 +37,24 @@ export interface DraftPublishPanelApi {
 	resolveConflict?(): void;
 }
 
+export interface DraftPanelSessionRecovery {
+	/** Message explaining what happened and what not to do meanwhile. */
+	message: string;
+	/** Where to sign in again; opened in a new tab so the draft page survives. */
+	href: string;
+	label: string;
+}
+
 export interface DraftPublishPanelProps {
 	api: DraftPublishPanelApi;
+	/**
+	 * What to show when the host reports an expired session. Without it an
+	 * expired session simply hides the card; with it the user gets the one clear
+	 * next step a blocked state owes them.
+	 */
+	sessionRecovery?: DraftPanelSessionRecovery;
+	/** Recognises a host error as "the session expired". */
+	isSessionExpired?(error: unknown): boolean;
 	/** Poll interval in ms; an app with live events can pass a large number. */
 	pollIntervalMs?: number;
 	/** Subscribe to app events that mean "the draft moved"; returns unsubscribe. */
@@ -120,6 +136,8 @@ function RecordRow({
 
 export function DraftPublishPanel({
 	api,
+	sessionRecovery,
+	isSessionExpired,
 	pollIntervalMs = DEFAULT_POLL_MS,
 	subscribe,
 	onOpenRecord,
@@ -129,16 +147,25 @@ export function DraftPublishPanel({
 	const [busy, setBusy] = useState(false);
 	const [message, setMessage] = useState<{ text: string; tone: "info" | "error" } | null>(null);
 	const [available, setAvailable] = useState(true);
+	const [sessionExpired, setSessionExpired] = useState(false);
 
 	const refresh = useCallback(async () => {
 		try {
 			setInput(await api.loadReview());
 			setAvailable(true);
-		} catch {
-			// No mounted data checkout: stay silent rather than shout an error.
+			setSessionExpired(false);
+		} catch (error) {
+			// An expired session is a blocked state the user can act on, so it is
+			// shown. Anything else — typically no mounted data checkout — stays
+			// silent rather than shouting an error at someone who cannot fix it.
+			if (isSessionExpired?.(error)) {
+				setSessionExpired(true);
+				setAvailable(true);
+				return;
+			}
 			setAvailable(false);
 		}
-	}, [api]);
+	}, [api, isSessionExpired]);
 
 	useEffect(() => {
 		void refresh();
@@ -241,6 +268,25 @@ export function DraftPublishPanel({
 		},
 		[api, model, run],
 	);
+
+	if (sessionExpired && sessionRecovery) {
+		return (
+			<section className="rdb-draft-card rdb-draft-conflict" aria-label="Přihlášení vypršelo">
+				<div className="rdb-draft-body rdb-draft-session">
+					<p className="rdb-draft-headline">Přihlášení vypršelo</p>
+					<p className="rdb-draft-note">{sessionRecovery.message}</p>
+					<a
+						className="rdb-draft-session-link"
+						href={sessionRecovery.href}
+						target="_blank"
+						rel="noopener noreferrer"
+					>
+						{sessionRecovery.label}
+					</a>
+				</div>
+			</section>
+		);
+	}
 
 	if (!available || !model?.visible) return null;
 

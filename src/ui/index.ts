@@ -10,6 +10,7 @@ export {
 } from "./draftPanelModel.ts";
 export {
 	DraftPublishPanel,
+	type DraftPanelSessionRecovery,
 	type DraftPublishPanelApi,
 	type DraftPublishPanelProps,
 } from "./DraftPublishPanel.tsx";
