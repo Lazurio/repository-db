@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `ReviewInputChange` now carries the baseline content the engine already read,
+  so an app adapter can diff against the published version without a second
+  `git show` per record.
+
 - Add `canRevertRecords()` and let `readBaselineFile()` take an already resolved
   baseline ref, so a review panel answers "can this be reverted" for a whole
   draft with one set of Git reads instead of six per record.

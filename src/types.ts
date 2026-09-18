@@ -243,6 +243,15 @@ export interface ReviewInputChange {
 	draftContentHash?: string;
 	/** Hash of the baseline file/content when available. */
 	baselineContentHash?: string;
+	/**
+	 * Baseline file content, when the engine already read it.
+	 *
+	 * An app adapter has to diff against the published version, and the engine
+	 * reads that same content to hash it — handing it over saves a second
+	 * `git show` per record, which is the difference between a snappy review and
+	 * a stalled request on a large draft.
+	 */
+	baselineText?: string;
 	/** Source technical refs for generated outputs, when known. */
 	generatedFrom?: ReviewTechnicalReference[];
 	/** Informational provenance; never gates an operation. */

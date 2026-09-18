@@ -268,6 +268,7 @@ export function collectInputChanges(
 			technicalRefs: [{ path: relativePath, kind: refKind }],
 			draftContentHash: draft === undefined ? undefined : sha256(draft),
 			baselineContentHash: baseline === undefined ? undefined : sha256(baseline),
+			baselineText: baseline,
 			origin: toOrigin(origins.get(relativePath)),
 		} satisfies ReviewInputChange;
 	});
