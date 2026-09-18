@@ -26,7 +26,7 @@ import {
 } from "./generated.ts";
 import { ENGINE_DIR, acquirePublishLock } from "./lock.ts";
 import { clearDraftProvenance } from "./origin.ts";
-import { computeDraftRevision, draftContentMatches } from "./draftRevision.ts";
+import { computeCanonicalContentHash, computeDraftRevision } from "./draftRevision.ts";
 import { DraftChangedError } from "./discard.ts";
 import { buildCommitMessage, newChangeId } from "./trailers.ts";
 import { writeFileAtomic } from "./yamlIo.ts";
@@ -244,6 +244,14 @@ export async function publish(
 		}
 
 		stageTrackedPublishLockCleanup(mountRoot);
+		// Captured after publish's own repair step and before validate and
+		// materialize, because those run configured commands that take time.
+		// Generated output is excluded: materialize rewrites it by design, so
+		// including it would make a correct publish refuse itself.
+		const confirmedContent =
+			options.expectedRevision === undefined
+				? undefined
+				: computeCanonicalContentHash(mountRoot, config);
 		if (!options.skipValidate) {
 			runValidateCommands(mountRoot, config);
 		}
@@ -291,12 +299,15 @@ export async function publish(
 		// Integrate remote changes before committing the local batch.
 		await integrateRemoteChanges(mountRoot, config, "publish");
 
-		// Second check, at the moment that matters: staging takes the live
-		// working tree, and integration above involved network waits during
-		// which a write could have landed. Only the content part is compared —
-		// integration moves the baseline by design, the user's draft content
-		// must not have moved at all.
-		if (options.expectedRevision !== undefined && !draftContentMatches(mountRoot, options.expectedRevision)) {
+		// Second check, at the moment that matters: staging takes the live working
+		// tree, and validate, materialize and integration all ran in between,
+		// with network waits during which a write could have landed.
+		// Only when the caller confirmed something: a headless publish with
+		// nothing displayed has no version to hold it to.
+		if (
+			confirmedContent !== undefined &&
+			computeCanonicalContentHash(mountRoot, config) !== confirmedContent
+		) {
 			throw new DraftChangedError(computeDraftRevision(mountRoot));
 		}
 

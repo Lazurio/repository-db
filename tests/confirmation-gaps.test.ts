@@ -136,18 +136,17 @@ describe("the shared write gate", () => {
 			const release = acquirePublishLock(fixture.mountPath);
 			const started = Date.now();
 			try {
-				// Short wait here only to keep the test quick; the production
-				// default gives an ordinary autosave time to ride out a publish.
 				expect(() =>
-					withDraftWriteLock(fixture.mountPath, () => writeFixtureDocument(fixture.mountPath, "blocked", { name: "Blocked" }), {
-						waitMs: 300,
-					}),
+					withDraftWriteLock(fixture.mountPath, () =>
+						writeFixtureDocument(fixture.mountPath, "blocked", { name: "Blocked" }),
+					),
 				).toThrow(/publish or discard is in progress/);
 			} finally {
 				release();
 			}
-			// It waited rather than failing on the first attempt.
-			expect(Date.now() - started).toBeGreaterThanOrEqual(250);
+			// Fails immediately: a host runs publish on this same thread, so
+			// waiting here would stall the publish it is waiting for.
+			expect(Date.now() - started).toBeLessThan(1_000);
 			expect(existsSync(path.join(fixture.mountPath, "data/things/blocked.yaml"))).toBe(false);
 		} finally {
 			rmSync(fixture.root, { recursive: true, force: true });
@@ -173,7 +172,7 @@ describe("the shared write gate", () => {
 		} finally {
 			rmSync(fixture.root, { recursive: true, force: true });
 		}
-	}, 20_000);
+	});
 
 	test("the gate releases even when the write throws", () => {
 		const fixture = createFixtureRepo();
@@ -337,5 +336,53 @@ describe("the panel does not offer what the host cannot do", () => {
 		);
 		expect(model.actions.find((action) => action.kind === "finish_send")?.enabled).toBe(true);
 		expect(model.pendingHead).toBe("c".repeat(40));
+	});
+});
+
+describe("publishing a draft that regenerates output", () => {
+	test("a materializer rewriting generated files does not look like someone else's write", async () => {
+		const fixture = createFixtureRepo();
+		try {
+			// A declared artifact with a materializer, which is the ordinary shape
+			// of a repository-db app and the case a fixture without one hides.
+			const materializer =
+				"sh -c 'printf \"count: %s\\n\" \"$(ls data/things | wc -l | tr -d \" \")\" > generated/rollup.yaml'";
+			writeFileSync(
+				path.join(fixture.mountPath, "repository-db.yaml"),
+				[
+					"schema_version: repository-db.config.v1",
+					"app: fixture",
+					`data_repo: {remote: ${fixture.originPath}, branch: ${fixture.branch}}`,
+					"schema: {name: fixture-data, version: 3.0.0-alpha.0}",
+					"layout: {data: data, generated: generated, scripts: scripts}",
+					"generated_manifest:",
+					"  - path: generated/rollup.yaml",
+					`    materializer: ${JSON.stringify(materializer)}`,
+					"validate: []",
+					"",
+				].join("\n"),
+				"utf8",
+			);
+			publishBaseline(fixture);
+
+			const db = RepositoryDb.open(fixture.mountPath);
+			writeFixtureDocument(fixture.mountPath, "new-record", { name: "New" });
+			const snapshot = await db.review();
+
+			const result = await db.publish({
+				actor: ACTOR,
+				source: "test",
+				expectedRevision: snapshot.draftRevision,
+			});
+
+			// The regenerated rollup is part of the publish, not a reason to refuse it.
+			expect(result.state).toBe("published");
+			expect(db.status().dirtyPaths).toEqual([]);
+			expect(
+				readFileSync(path.join(fixture.mountPath, "generated/rollup.yaml"), "utf8"),
+			).toContain("count:");
+		} finally {
+			rmSync(fixture.root, { recursive: true, force: true });
+		}
 	});
 });

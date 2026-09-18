@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- The pre-staging check now compares canonical draft content captured after
+  publish's own repair steps, instead of the revision's content part: a declared
+  materializer rewriting generated output was making a correctly confirmed
+  publish refuse itself.
+- The write gate fails immediately instead of waiting. A host runs publish on
+  the same thread, so a synchronous wait would block the event loop that has to
+  finish that publish and release the lock.
+
 - The card no longer offers "Zahodit vše" while a commit is waiting to be sent:
   the engine refuses it there, because HEAD is not the published state.
 

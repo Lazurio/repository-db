@@ -133,12 +133,15 @@ offered an action that then refuses.
 Unchanged in its guarantees (validate → materialize → rebase → one audited commit
 → push), plus the revision check. The whole draft goes out as one commit.
 
-The revision is checked **twice**: when the lock is taken, and again immediately
-before staging. The second check matters because integration happens in between
-and involves the network — a write landing in that window would otherwise be
-staged although nobody reviewed it. Only the content part is compared the second
-time: integration moves the baseline by design, the reviewed content must not
-have moved at all.
+The confirmation is checked **twice**: the full revision when the lock is taken,
+and the canonical draft content again immediately before staging. The second
+check matters because validate, materialize and integration all run in between,
+with commands and network waits during which a write could land.
+
+The second measure deliberately excludes generated output and is captured after
+publish's own repair steps: materializing a rollup is publishing doing its job,
+and treating it as somebody else's write would make a correct publish refuse
+itself.
 
 ### Finishing a send
 
@@ -158,7 +161,9 @@ one click.
 | any other direct filesystem write | no | yes — publish refuses rather than including it |
 
 The gate is the publish lock itself, not a second mechanism: a supported write
-takes it briefly and waits if a publish or discard holds it. The engine does not
+takes it briefly, and fails immediately if a publish or discard holds it rather
+than waiting — a host runs publish on the same thread, so waiting would stall
+the very operation the write is waiting for. The engine does not
 claim to hold back a process that writes the checkout without passing through
 it; for those, the content check before staging is the guarantee — such a write
 makes the publish stop, it never rides along.

@@ -3,6 +3,7 @@ import { existsSync, lstatSync, readFileSync, readlinkSync } from "node:fs";
 import path from "node:path";
 import { gitDirtyPaths, gitHeadCommit } from "./git.ts";
 import { ENGINE_DIR } from "./lock.ts";
+import type { RepositoryDbConfig } from "./types.ts";
 
 /**
  * Draft revision — the identity of "the draft as it was shown".
@@ -100,14 +101,24 @@ export function parseDraftRevision(revision: string): DraftRevisionParts {
 }
 
 /**
- * Does the working tree still hold exactly the content that was confirmed?
+ * Fingerprint of the canonical draft content — everything dirty except
+ * generated output.
  *
- * Deliberately ignores the baseline: publish integrates remote work between the
- * confirmation and the commit, which moves the baseline without changing what
- * the user reviewed. This is the check that runs immediately before staging.
+ * This is what publish compares before staging. It cannot be derived from the
+ * revision, because publishing legitimately rewrites generated artifacts on the
+ * way: materializing a rollup would otherwise look exactly like a colleague's
+ * write and make a correct publish refuse itself. So publish captures this
+ * fingerprint right after the confirmation and compares the same measure again
+ * at the moment it stages.
  */
-export function draftContentMatches(mountRoot: string, expectedRevision: string): boolean {
-	const expected = parseDraftRevision(expectedRevision);
-	if (!expected.content) return false;
-	return expected.content === computeDraftRevisionParts(mountRoot).content;
+export function computeCanonicalContentHash(
+	mountRoot: string,
+	config: RepositoryDbConfig,
+): string {
+	const generatedPrefix = `${config.layout.generated}/`;
+	const dirtyPaths = gitDirtyPaths(mountRoot)
+		.filter((entry) => !entry.startsWith(`${ENGINE_DIR}/`))
+		.filter((entry) => entry !== config.layout.generated)
+		.filter((entry) => !entry.startsWith(generatedPrefix));
+	return contentHash(mountRoot, dirtyPaths);
 }

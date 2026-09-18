@@ -85,55 +85,42 @@ export function acquirePublishLock(mountRoot: string): () => void {
 	};
 }
 
-/** How long a supported write waits for an in-flight publish or discard. */
-const WRITE_GATE_WAIT_MS = 10_000;
-const WRITE_GATE_POLL_MS = 25;
-
-function sleepSync(ms: number): void {
-	Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-}
-
 /**
  * The shared gate every supported writer passes through.
  *
  * This is the same lock publish and discard hold — not a second mechanism. It
  * is what makes "the draft I confirmed is the draft I published" true for
  * writes the engine knows about: a `Collection` write or a CLI write cannot
- * land inside a publish's integrate-then-stage window, or between a discard's
- * revision check and its cleanup.
+ * land inside a publish's validate-integrate-stage window, or between a
+ * discard's revision check and its cleanup.
+ *
+ * It fails immediately rather than waiting. Waiting would be worse than
+ * useless: a host app runs publish in the same single-threaded process, so a
+ * synchronous wait would block the very event loop that has to finish the
+ * publish and release the lock — the write would stall the server and then fail
+ * anyway. A caller that wants to retry can do so where it can actually await.
  *
  * The contract is deliberately narrow. A process that writes the data checkout
  * directly, without this gate, is not held back by it; for those, the content
- * re-check before staging is the backstop that makes publish refuse rather
- * than quietly include the write.
- *
- * Writes wait briefly rather than failing instantly, because a publish takes
- * seconds and an autosave landing in that window is ordinary, not exceptional.
+ * check before staging is the backstop that makes publish refuse rather than
+ * quietly include the write.
  */
-export function withDraftWriteLock<T>(
-	mountRoot: string,
-	write: () => T,
-	options: { waitMs?: number } = {},
-): T {
-	const deadline = Date.now() + (options.waitMs ?? WRITE_GATE_WAIT_MS);
-	for (;;) {
-		let release: (() => void) | undefined;
-		try {
-			release = acquirePublishLock(mountRoot);
-		} catch (error) {
-			if (!(error instanceof PublishLockedError) || Date.now() >= deadline) {
-				throw new RepositoryDbError(
-					"draft_write_blocked",
-					"A publish or discard is in progress on this data checkout; the write was not applied. Try again in a moment.",
-				);
-			}
-			sleepSync(WRITE_GATE_POLL_MS);
-			continue;
+export function withDraftWriteLock<T>(mountRoot: string, write: () => T): T {
+	let release: () => void;
+	try {
+		release = acquirePublishLock(mountRoot);
+	} catch (error) {
+		if (error instanceof PublishLockedError) {
+			throw new RepositoryDbError(
+				"draft_write_blocked",
+				"A publish or discard is in progress on this data checkout; the write was not applied. Try again in a moment.",
+			);
 		}
-		try {
-			return write();
-		} finally {
-			release();
-		}
+		throw error;
+	}
+	try {
+		return write();
+	} finally {
+		release();
 	}
 }

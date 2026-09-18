@@ -82,7 +82,11 @@ export {
 	type DiscardResult,
 	type DiscardScope,
 } from "./discard.ts";
-export { computeDraftRevision } from "./draftRevision.ts";
+export {
+	computeCanonicalContentHash,
+	computeDraftRevision,
+	parseDraftRevision,
+} from "./draftRevision.ts";
 export {
 	clearDraftOrigins,
 	clearDraftOwner,
