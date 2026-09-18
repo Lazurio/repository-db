@@ -177,3 +177,23 @@ describe("draft panel model", () => {
 		expect(model.actions).toEqual([]);
 	});
 });
+
+describe("an unsent commit underneath a draft", () => {
+	test("does not offer a discard the engine would refuse", () => {
+		const model = deriveDraftPanel(input({ state: "draft", ahead: 1 }));
+		const discard = model.actions.find((action) => action.kind === "discard_draft");
+
+		expect(model.tone).toBe("draft");
+		expect(discard?.enabled).toBe(false);
+		expect(discard?.disabledReason).toContain("dokončete odeslání");
+		// Publishing everything is still the way forward.
+		expect(model.actions.find((action) => action.kind === "publish")?.enabled).toBe(true);
+	});
+
+	test("an ordinary draft still offers it", () => {
+		const model = deriveDraftPanel(input({ state: "draft", ahead: 0 }));
+		expect(
+			model.actions.find((action) => action.kind === "discard_draft")?.enabled,
+		).toBe(true);
+	});
+});

@@ -254,6 +254,7 @@ export function deriveDraftPanel(
 	}
 
 	if (count > 0) {
+		const unsentCommit = input.ahead ?? 0;
 		const readiness = input.publishReadiness;
 		const blocking = readiness?.references.filter((reference) => reference.blocking) ?? [];
 		return {
@@ -275,7 +276,19 @@ export function deriveDraftPanel(
 					enabled: blocking.length === 0,
 					disabledReason: blocking[0]?.message,
 				},
-				{ kind: "discard_draft", label: "Zahodit vše", enabled: true, destructive: true },
+				{
+					kind: "discard_draft",
+					label: "Zahodit vše",
+					// An unsent commit underneath means "the published state" is not
+					// what a discard would return to, so the engine refuses it. The
+					// card must not offer what would then be refused.
+					enabled: unsentCommit === 0,
+					disabledReason:
+						unsentCommit > 0
+							? "Nejdřív dokončete odeslání uložené publikace; do té doby není poslední publikovaná verze tady."
+							: undefined,
+					destructive: true,
+				},
 			], capabilities),
 		};
 	}

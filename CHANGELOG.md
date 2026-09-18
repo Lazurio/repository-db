@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- The card no longer offers "Zahodit vše" while a commit is waiting to be sent:
+  the engine refuses it there, because HEAD is not the published state.
+
 - Close the confirmation gaps QA found. The draft revision is now two parts
   (`draft:<baseline>.<content>`) and covers the Git file mode; `publish()`
   re-checks the content part immediately before staging, so a write landing
