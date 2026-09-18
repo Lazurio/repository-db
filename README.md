@@ -40,6 +40,14 @@ Remote changes are detected via `git fetch` (`status --fetch`, `sync`) — no
 inbound webhook is required; webhooks are only a faster signal where a host
 can accept them.
 
+## Draft & Publish standard
+
+[`docs/draft-publish-standard.md`](docs/draft-publish-standard.md) is the
+normative standard for every repository-db-backed v3 application: how a draft is
+presented, reviewed in business language, reverted and published, and what an
+agent must do around it. Read it first; the two contract documents below are its
+detailed type references.
+
 ## Review Surface and Draft Publish Card contracts
 
 Repository DB exposes app-agnostic TypeScript contracts for higher-level v3 UI

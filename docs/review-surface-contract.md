@@ -1,5 +1,9 @@
 # Review Surface contracts
 
+> This document is the detailed reference for the review resource and change types.
+> The normative application-facing rules live in
+> [`draft-publish-standard.md`](draft-publish-standard.md).
+
 Repository DB owns Git/YAML status, conflict detection and publish gating. Host
 applications can add domain interpretation through a Review Surface adapter, but
 the shared contract stays application-agnostic: Repository DB talks about

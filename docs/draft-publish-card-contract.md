@@ -1,5 +1,9 @@
 # Draft Publish Card contract
 
+> This document is the detailed reference for the card view-model.
+> The normative application-facing rules live in
+> [`draft-publish-standard.md`](draft-publish-standard.md).
+
 Repository DB owns the generic state model for repository-backed v3 applications:
 local draft changes, committed-but-unpushed work, remote freshness, and conflicts.
 Every v3 application should render that state through the same **Draft Publish
