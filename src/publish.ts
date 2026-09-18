@@ -26,6 +26,8 @@ import {
 } from "./generated.ts";
 import { ENGINE_DIR, acquirePublishLock } from "./lock.ts";
 import { clearDraftProvenance } from "./origin.ts";
+import { computeDraftRevision } from "./draftRevision.ts";
+import { DraftChangedError } from "./discard.ts";
 import { buildCommitMessage, newChangeId } from "./trailers.ts";
 import { writeFileAtomic } from "./yamlIo.ts";
 import {
@@ -219,6 +221,14 @@ export async function publish(
 
 	const releaseLock = acquirePublishLock(mountRoot);
 	try {
+		// Under the lock: publishing confirms exactly the draft that was shown.
+		if (options.expectedRevision) {
+			const currentRevision = computeDraftRevision(mountRoot);
+			if (currentRevision !== options.expectedRevision) {
+				throw new DraftChangedError(currentRevision);
+			}
+		}
+
 		stageTrackedPublishLockCleanup(mountRoot);
 		if (!options.skipValidate) {
 			runValidateCommands(mountRoot, config);

@@ -2,196 +2,276 @@ import { rmSync } from "node:fs";
 import path from "node:path";
 import { assertDataRepoBoundary } from "./boundary.ts";
 import { activeConflict } from "./conflict.ts";
-import { isPathDeclared } from "./generated.ts";
-import { gitDirtyPaths, runGit, runGitOrThrow } from "./git.ts";
-import { acquirePublishLock, ENGINE_DIR } from "./lock.ts";
+import { computeDraftRevision } from "./draftRevision.ts";
 import {
-	clearDraftOrigins,
-	clearDraftOwner,
-	isForeignChange,
-	resolveDraftOrigins,
-} from "./origin.ts";
+	gitAheadBehind,
+	gitDirtyPaths,
+	gitRenameSources,
+	runGit,
+	runGitOrThrow,
+} from "./git.ts";
+import { acquirePublishLock, ENGINE_DIR } from "./lock.ts";
+import { clearDraftOrigins, clearDraftOwner, pruneDraftOrigins } from "./origin.ts";
 import { type RepositoryDbConfig, RepositoryDbError } from "./types.ts";
 
 /**
- * Discard — returning draft work to the last published state.
+ * Discard — taking work back out of the draft.
  *
- * This is the counterpart of publish: the same lock, the same fail-closed
- * posture, the opposite direction. It is deliberately NOT a reuse of
- * `conflict --abort`; dropping unwanted work is an ordinary, targeted
- * operation over the current dirty set, not a side effect of a recovery path.
+ * Two scopes only, both predictable:
  *
- * Reverting a single field is not an engine primitive: Git works per file, so a
- * field revert is an ordinary write of the baseline value by the host app.
+ *   - `record`  — one canonical data file returns to its published content;
+ *   - `draft`   — the whole shared draft returns to the published state.
+ *
+ * Anything in between is refused with a readable reason rather than guessed at.
+ * A record whose revert would leave related data inconsistent (a stale generated
+ * artifact, a half-undone rename) is not "reverted as best we can"; the action
+ * is simply not available, and the panel says why. This engine does not model
+ * dependencies between records, and it must never touch a change the user did
+ * not ask about.
+ *
+ * Reverting a single field is not an engine primitive either: Git works per
+ * file, so a field revert is an ordinary write of the baseline value by the app.
  */
 
-export interface DiscardOptions {
-	/** Repo-relative paths to discard. Ignored when `all` is set. */
-	paths?: readonly string[];
-	/** Discard the whole current dirty set. */
-	all?: boolean;
-	/** Identity of the requester, matched against recorded draft provenance. */
-	actor?: string;
-	/** Proceed even when the target contains changes the actor cannot claim. */
-	confirmForeign?: boolean;
-}
+export type DiscardScope =
+	| { kind: "record"; path: string }
+	| { kind: "draft" };
 
-export interface DiscardedPath {
-	path: string;
-	/** `restored` = returned to its HEAD content, `removed` = untracked addition deleted. */
-	action: "restored" | "removed";
+export interface DiscardOptions {
+	scope: DiscardScope;
+	/**
+	 * Revision of the draft the user was looking at. The operation runs only if
+	 * the draft still looks exactly like that.
+	 */
+	expectedRevision: string;
 }
 
 export interface DiscardResult {
-	discarded: DiscardedPath[];
-	/** Declared generated artifacts pulled in because their source was discarded. */
-	generatedIncluded: string[];
-	/** Dirty paths still present after the discard. */
+	scope: DiscardScope["kind"];
+	/** Paths returned to their published content. */
+	restored: string[];
+	/** Paths that only existed in the draft and were removed. */
+	removed: string[];
+	/** Dirty paths still present afterwards. */
 	remainingDirtyPaths: string[];
+	/** Revision of the draft after the discard. */
+	revision: string;
 }
 
-export class ForeignChangeError extends RepositoryDbError {
-	readonly foreignPaths: string[];
+/** The displayed draft is no longer the current one; refresh and decide again. */
+export class DraftChangedError extends RepositoryDbError {
+	readonly currentRevision: string;
 
-	constructor(foreignPaths: string[]) {
+	constructor(currentRevision: string) {
 		super(
-			"foreign_change_requires_confirm",
-			`discard refused: ${foreignPaths.length} change(s) were not written by the requesting actor ` +
-				`(${foreignPaths.slice(0, 5).join(", ")}${foreignPaths.length > 5 ? ", …" : ""}). ` +
-				"Re-run with an explicit confirmation to discard them.",
+			"draft_changed",
+			"The draft changed since it was shown. Nothing was modified — refresh the review and confirm again.",
 		);
-		this.name = "ForeignChangeError";
-		this.foreignPaths = foreignPaths;
+		this.name = "DraftChangedError";
+		this.currentRevision = currentRevision;
 	}
 }
 
-/** Does `relativePath` exist in the current HEAD commit? */
+/** This particular revert is out of the supported scope; the reason explains why. */
+export class RevertNotSupportedError extends RepositoryDbError {
+	readonly reason:
+		| "not_in_draft"
+		| "generated_artifact"
+		| "related_generated_changes"
+		| "renamed_record"
+		| "not_canonical_data";
+
+	constructor(reason: RevertNotSupportedError["reason"], message: string) {
+		super("revert_not_supported", message);
+		this.name = "RevertNotSupportedError";
+		this.reason = reason;
+	}
+}
+
 function existsInHead(mountRoot: string, relativePath: string): boolean {
 	return runGit(mountRoot, ["cat-file", "-e", `HEAD:${relativePath}`]).status === 0;
 }
 
 function isTrackedInIndex(mountRoot: string, relativePath: string): boolean {
-	const result = runGit(mountRoot, ["ls-files", "--error-unmatch", "--", relativePath]);
-	return result.status === 0;
+	return runGit(mountRoot, ["ls-files", "--error-unmatch", "--", relativePath]).status === 0;
+}
+
+function dirtyPathsOf(mountRoot: string): string[] {
+	return gitDirtyPaths(mountRoot).filter((entry) => !entry.startsWith(`${ENGINE_DIR}/`));
 }
 
 /**
- * Expand the requested target set.
+ * Guards that apply to both scopes.
  *
- * Declared generated artifacts are derived data: once a canonical source is
- * returned to its published state, a dirty generated artifact built from the
- * newer draft is stale. Rather than leave that inconsistency behind, discarding
- * any canonical path also discards dirty declared generated output, which the
- * next publish re-materializes deterministically.
+ * The unpushed-commit guard matters for honesty: once a publish has committed
+ * but failed to push, HEAD is a local commit that nobody else has. Returning to
+ * HEAD would not be "returning to the last published version", so discard steps
+ * aside and the user finishes sending the existing commit instead.
  */
-function expandTargets(
-	requested: readonly string[],
-	dirtyPaths: readonly string[],
-	config: RepositoryDbConfig,
-): { targets: string[]; generatedIncluded: string[] } {
-	const generatedPrefix = `${config.layout.generated}/`;
-	const isGenerated = (entry: string) =>
-		entry === config.layout.generated || entry.startsWith(generatedPrefix);
-
-	const targets = new Set(requested);
-	const generatedIncluded: string[] = [];
-	const touchesCanonical = requested.some((entry) => !isGenerated(entry));
-	if (touchesCanonical) {
-		for (const entry of dirtyPaths) {
-			if (!isGenerated(entry) || targets.has(entry)) continue;
-			if (!isPathDeclared(entry, config)) continue;
-			targets.add(entry);
-			generatedIncluded.push(entry);
-		}
+function assertDiscardable(mountRoot: string, config: RepositoryDbConfig): void {
+	if (activeConflict(mountRoot)) {
+		throw new RepositoryDbError(
+			"conflict_active",
+			"The data repository is in a conflict state. Resolve or abort the conflict first; the draft stays visible meanwhile.",
+		);
 	}
-	return { targets: [...targets], generatedIncluded };
+	const { ahead } = gitAheadBehind(mountRoot, config.dataRepo.branch);
+	if (ahead > 0) {
+		throw new RepositoryDbError(
+			"unpushed_commit",
+			"A published commit is still waiting to be sent. Finish sending it first — until then the local state is not the last published version.",
+		);
+	}
 }
 
 /**
- * Return draft changes to the last published state.
+ * Is a single-record revert safe and predictable here?
  *
- * Refuses while a conflict is recorded — recovery has to finish first — and
- * holds the publish lock so a discard can never race a publish over the same
- * working tree.
+ * Deliberately narrow: exactly one canonical data file, no rename involved, and
+ * no dirty generated output that the revert would leave stale.
+ */
+function assertRecordRevertSupported(
+	mountRoot: string,
+	config: RepositoryDbConfig,
+	relativePath: string,
+	dirtyPaths: readonly string[],
+): void {
+	if (!dirtyPaths.includes(relativePath)) {
+		throw new RevertNotSupportedError(
+			"not_in_draft",
+			`"${relativePath}" is not part of the current draft.`,
+		);
+	}
+
+	const generatedPrefix = `${config.layout.generated}/`;
+	if (relativePath === config.layout.generated || relativePath.startsWith(generatedPrefix)) {
+		throw new RevertNotSupportedError(
+			"generated_artifact",
+			"This is generated output, not a record. It is rebuilt on publish; revert the record it comes from instead.",
+		);
+	}
+	if (!relativePath.startsWith(`${config.layout.data}/`)) {
+		throw new RevertNotSupportedError(
+			"not_canonical_data",
+			"Only canonical records can be reverted individually. Discard the whole draft, or change this file the ordinary way.",
+		);
+	}
+
+	const dirtyGenerated = dirtyPaths.filter(
+		(entry) => entry === config.layout.generated || entry.startsWith(generatedPrefix),
+	);
+	if (dirtyGenerated.length > 0) {
+		throw new RevertNotSupportedError(
+			"related_generated_changes",
+			"The draft also contains generated data built from these records. Reverting one record alone would leave it inconsistent — discard the whole draft instead.",
+		);
+	}
+
+	const renameSources = gitRenameSources(mountRoot);
+	if (renameSources.has(relativePath) || [...renameSources.values()].includes(relativePath)) {
+		throw new RevertNotSupportedError(
+			"renamed_record",
+			"This record was renamed in the draft. Reverting one side alone would leave the other behind — discard the whole draft instead.",
+		);
+	}
+}
+
+/**
+ * Return draft work to the published state.
+ *
+ * Holds the publish lock, so a discard can never race a publish over the same
+ * working tree, and re-checks the displayed revision under that lock.
  */
 export function discardDraft(
 	mountRoot: string,
 	config: RepositoryDbConfig,
-	options: DiscardOptions = {},
+	options: DiscardOptions,
 ): DiscardResult {
 	assertDataRepoBoundary(mountRoot, config);
-
-	if (activeConflict(mountRoot)) {
-		throw new RepositoryDbError(
-			"conflict_active",
-			"discard refused: the repository is in a conflict state. Resolve or abort the conflict first.",
-		);
-	}
-	if (!options.all && (!options.paths || options.paths.length === 0)) {
+	if (!options.expectedRevision) {
 		throw new RepositoryDbError(
 			"invalid_args",
-			"discard requires either explicit paths or the whole-draft option.",
+			"discard requires the revision of the draft that was shown.",
 		);
 	}
+	assertDiscardable(mountRoot, config);
 
 	const release = acquirePublishLock(mountRoot);
 	try {
-		const dirtyPaths = gitDirtyPaths(mountRoot).filter(
-			(entry) => !entry.startsWith(`${ENGINE_DIR}/`),
-		);
-		if (dirtyPaths.length === 0) {
-			return { discarded: [], generatedIncluded: [], remainingDirtyPaths: [] };
+		// Under the lock: the draft must still be exactly what the user saw.
+		const currentRevision = computeDraftRevision(mountRoot);
+		if (currentRevision !== options.expectedRevision) {
+			throw new DraftChangedError(currentRevision);
 		}
 
-		const requested = options.all ? dirtyPaths : [...(options.paths ?? [])];
-		const dirtySet = new Set(dirtyPaths);
-		const unknown = requested.filter((entry) => !dirtySet.has(entry));
-		if (unknown.length > 0) {
-			throw new RepositoryDbError(
-				"not_in_draft",
-				`discard refused: not part of the current draft: ${unknown.join(", ")}`,
-			);
-		}
+		const dirtyPaths = dirtyPathsOf(mountRoot);
+		const restored: string[] = [];
+		const removed: string[] = [];
 
-		const { targets, generatedIncluded } = expandTargets(requested, dirtyPaths, config);
-
-		if (!options.confirmForeign) {
-			const origins = resolveDraftOrigins(mountRoot, dirtyPaths);
-			const foreign = targets.filter((entry) =>
-				isForeignChange(origins.get(entry), options.actor),
-			);
-			if (foreign.length > 0) throw new ForeignChangeError(foreign);
-		}
-
-		const discarded: DiscardedPath[] = [];
-		for (const target of targets) {
-			if (existsInHead(mountRoot, target)) {
-				// Restores both the index and the working tree, so a staged edit
-				// and an unstaged one return to the same published content.
-				runGitOrThrow(mountRoot, ["checkout", "HEAD", "--", target]);
-				discarded.push({ path: target, action: "restored" });
-				continue;
+		if (options.scope.kind === "draft") {
+			// The whole draft is one unit, so it returns as one unit. Git's own
+			// reset+clean is the smallest mechanism that also handles staged
+			// edits, deletions and renames correctly. `clean -fd` leaves ignored
+			// files alone, so the engine layer survives.
+			for (const entry of dirtyPaths) {
+				if (existsInHead(mountRoot, entry)) restored.push(entry);
+				else removed.push(entry);
 			}
-			// New in this draft: drop it from the index when it was staged, then
-			// remove the file itself.
-			if (isTrackedInIndex(mountRoot, target)) {
-				runGitOrThrow(mountRoot, ["rm", "--force", "--quiet", "--", target]);
+			runGitOrThrow(mountRoot, ["reset", "--hard", "HEAD"]);
+			runGitOrThrow(mountRoot, ["clean", "--force", "-d"]);
+			clearDraftOrigins(mountRoot);
+			clearDraftOwner(mountRoot);
+		} else {
+			const relativePath = options.scope.path;
+			assertRecordRevertSupported(mountRoot, config, relativePath, dirtyPaths);
+
+			if (existsInHead(mountRoot, relativePath)) {
+				runGitOrThrow(mountRoot, ["checkout", "HEAD", "--", relativePath]);
+				restored.push(relativePath);
+			} else {
+				if (isTrackedInIndex(mountRoot, relativePath)) {
+					runGitOrThrow(mountRoot, ["rm", "--force", "--quiet", "--", relativePath]);
+				}
+				rmSync(path.join(mountRoot, relativePath), { force: true });
+				removed.push(relativePath);
 			}
-			rmSync(path.join(mountRoot, target), { force: true, recursive: true });
-			discarded.push({ path: target, action: "removed" });
+			clearDraftOrigins(mountRoot, [relativePath]);
 		}
 
-		clearDraftOrigins(
-			mountRoot,
-			discarded.map((entry) => entry.path),
-		);
-		const remainingDirtyPaths = gitDirtyPaths(mountRoot).filter(
-			(entry) => !entry.startsWith(`${ENGINE_DIR}/`),
-		);
+		const remainingDirtyPaths = dirtyPathsOf(mountRoot);
+		// Pruning stale hints is a write, so it happens here, under the lock.
+		pruneDraftOrigins(mountRoot, remainingDirtyPaths);
 		if (remainingDirtyPaths.length === 0) clearDraftOwner(mountRoot);
 
-		return { discarded, generatedIncluded, remainingDirtyPaths };
+		return {
+			scope: options.scope.kind,
+			restored,
+			removed,
+			remainingDirtyPaths,
+			revision: computeDraftRevision(mountRoot),
+		};
 	} finally {
 		release();
+	}
+}
+
+/**
+ * Can this record be reverted on its own right now? The panel asks before it
+ * offers the action, so a user is never given a button that then refuses.
+ */
+export function recordRevertAvailability(
+	mountRoot: string,
+	config: RepositoryDbConfig,
+	relativePath: string,
+): { supported: boolean; reason?: string } {
+	try {
+		assertDiscardable(mountRoot, config);
+		assertRecordRevertSupported(mountRoot, config, relativePath, dirtyPathsOf(mountRoot));
+		return { supported: true };
+	} catch (error) {
+		return {
+			supported: false,
+			reason: error instanceof Error ? error.message : String(error),
+		};
 	}
 }

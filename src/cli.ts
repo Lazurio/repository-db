@@ -17,9 +17,9 @@ Usage:
   repository-db publish  [--mount <path>] --actor <actor> --source <source>
                          [--summary <text>] [--entity <id>]... [--json]
   repository-db review   [--mount <path>] [--json] [--inputs]
-  repository-db discard  [--mount <path>] (--path <p>... | --all) [--actor <actor>]
-                         [--confirm-foreign] [--json]
-  repository-db origin   [--mount <path>] --path <p>... --kind app|agent|external
+  repository-db discard  [--mount <path>] (--record <p> | --draft)
+                         [--revision <draft-revision>] [--json]
+  repository-db origin   [--mount <path>] --path <p>... --kind app|agent
                          --actor <actor> [--source <source>] [--json]
   repository-db conflict [--mount <path>] [--abort | --resolved] [--json]
 
@@ -29,9 +29,12 @@ Notes:
   before touching anything; commands refuse to run from a parent code repo.
   Publish = validate -> materialize generated -> rebase fetched origin/<branch>
   with autostash -> one commit with Repository-Db-* trailers -> push.
-  Review reports the current draft as reviewable resources; discard returns
-  draft work to the last published state. An agent stamps its own writes with
-  "origin --kind agent" so a reviewer can tell them apart from app writes.
+  Review reports the current draft as reviewable resources and prints its
+  revision. Discard returns one record or the whole draft to the published
+  state and runs only if the draft still matches that revision; omit
+  --revision to act on the draft as it stands right now. An agent stamps its
+  own writes with "origin --kind agent" so a reviewer can see where a change
+  came from; provenance is information only and never gates an operation.
 `;
 
 interface Args {
@@ -59,8 +62,7 @@ function parseArgs(argv: string[]): Args {
 			"resolved",
 			"create-remote",
 			"pull",
-			"all",
-			"confirm-foreign",
+			"draft",
 			"inputs",
 		]);
 		if (boolFlags.has(name)) {
@@ -228,7 +230,8 @@ async function main(argv: string[]): Promise<number> {
 					].join("\n");
 				});
 				return [
-					owner ? `draft owner: ${owner.actor} (${owner.kind})` : "draft owner: unknown",
+					owner ? `draft started by: ${owner.actor}` : "draft started by: unknown",
+					`draft revision: ${db.draftRevision()}`,
 					`publish readiness: ${snapshot.publishReadiness.state}`,
 					...lines,
 				].join("\n");
@@ -237,35 +240,35 @@ async function main(argv: string[]): Promise<number> {
 		}
 		case "discard": {
 			const db = RepositoryDb.open(mountPath(args));
-			const all = args.flags.get("all") === true;
-			if (!all && args.paths.length === 0) {
+			const record = args.flags.get("record");
+			const wholeDraft = args.flags.get("draft") === true;
+			if (wholeDraft === (typeof record === "string")) {
 				throw new RepositoryDbError(
 					"invalid_args",
-					"discard requires --path <p> (repeatable) or --all",
+					"discard requires exactly one of --record <path> or --draft",
 				);
 			}
 			const result = db.discard({
-				all,
-				paths: args.paths,
-				actor:
-					typeof args.flags.get("actor") === "string"
-						? (args.flags.get("actor") as string)
-						: undefined,
-				confirmForeign: args.flags.get("confirm-foreign") === true,
+				scope: wholeDraft ? { kind: "draft" } : { kind: "record", path: record as string },
+				// Without an explicit revision the CLI confirms the draft as it is
+				// right now; an app always passes the revision it displayed.
+				expectedRevision:
+					typeof args.flags.get("revision") === "string"
+						? (args.flags.get("revision") as string)
+						: db.draftRevision(),
 			});
 			emit(args, result, () =>
-				result.discarded.length === 0
-					? "nothing to discard (no matching draft changes)"
-					: [
-							`discarded ${result.discarded.length} path(s):`,
-							...result.discarded.map((entry) => `  - ${entry.action} ${entry.path}`),
-							result.generatedIncluded.length > 0
-								? `generated artifacts included: ${result.generatedIncluded.join(", ")}`
-								: "",
-							`remaining draft paths: ${result.remainingDirtyPaths.length}`,
-						]
-							.filter(Boolean)
-							.join("\n"),
+				[
+					result.restored.length > 0
+						? `restored to published content:\n${result.restored.map((p) => `  - ${p}`).join("\n")}`
+						: "",
+					result.removed.length > 0
+						? `removed (existed only in the draft):\n${result.removed.map((p) => `  - ${p}`).join("\n")}`
+						: "",
+					`remaining draft paths: ${result.remainingDirtyPaths.length}`,
+				]
+					.filter(Boolean)
+					.join("\n"),
 			);
 			return 0;
 		}
@@ -278,10 +281,10 @@ async function main(argv: string[]): Promise<number> {
 				);
 			}
 			const kind = requireFlag(args, "kind");
-			if (kind !== "app" && kind !== "agent" && kind !== "external") {
+			if (kind !== "app" && kind !== "agent") {
 				throw new RepositoryDbError(
 					"invalid_args",
-					`--kind must be app, agent or external (got ${kind})`,
+					`--kind must be app or agent (got ${kind}); an unrecorded path is reported as unknown`,
 				);
 			}
 			db.recordOrigin(args.paths, {

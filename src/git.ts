@@ -205,6 +205,37 @@ function gitStatusEntries(repoRoot: string, extraArgs: string[]): Array<[string,
 	return entries;
 }
 
+/**
+ * Staged rename/copy sources, keyed by their new path.
+ *
+ * `git status -z` reports `R`/`C` entries as `<new>\0<old>`, and
+ * {@link gitDirtyPaths} intentionally surfaces only the new path. A caller that
+ * has to return a renamed record to its published state needs the old path too,
+ * otherwise the source stays staged as deleted.
+ */
+export function gitRenameSources(repoRoot: string): Map<string, string> {
+	const output = runGitOrThrow(repoRoot, [
+		"status",
+		"--porcelain=v1",
+		"-z",
+		"--untracked-files=all",
+	]);
+	const tokens = output.split("\0").filter((token) => token.length > 0);
+	const sources = new Map<string, string>();
+	for (let index = 0; index < tokens.length; index += 1) {
+		const token = tokens[index] ?? "";
+		if (token.length < 4) continue;
+		const xy = token.slice(0, 2);
+		const newPath = token.slice(3);
+		if (xy.includes("R") || xy.includes("C")) {
+			const oldPath = tokens[index + 1];
+			if (oldPath) sources.set(newPath, oldPath);
+			index += 1;
+		}
+	}
+	return sources;
+}
+
 /** Porcelain dirty paths relative to the repo root (staged, unstaged and untracked). */
 export function gitDirtyPaths(repoRoot: string): string[] {
 	return gitStatusEntries(repoRoot, ["--untracked-files=all"]).map(

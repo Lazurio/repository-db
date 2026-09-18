@@ -3,19 +3,23 @@
 ## Unreleased
 
 - Implement the two engine primitives the Draft & Publish standard requires.
-  `review()` resolves the current draft into reviewable resources through
-  app-registered adapters, with a structural before/after field diff and a
-  fallback ladder that degrades to a generic schema diff and finally to a raw
-  technical file diff — a change is never hidden because no adapter matched.
-  `discard()` returns a resource, a path set or the whole draft to the last
-  published state under the publish lock, deletes untracked additions, carries
-  declared generated artifacts with their source and refuses changes the
-  requesting actor cannot claim until the caller confirms explicitly.
+  `review()` resolves the current draft into resources with business labels,
+  app routes and structural before/after field summaries, degrading to a generic
+  document diff and then to a technical file diff — a change is never hidden.
+  `discard()` has exactly two scopes: one canonical record, or the whole draft.
+  Anything in between is refused with a readable reason rather than guessed at,
+  and unrelated changes are never touched.
 
-- Add advisory draft provenance: a gitignored per-path origin hint
-  (`app` / `agent` / `external`) plus the coarse draft owner marker, both cleared
-  by publish and by discard. It is a hint for reviewers, never an authorization
-  input and never the audit record.
+- Add a draft revision (`computeDraftRevision`) so a confirmation always applies
+  to the version the user was shown. `publish()` and `discard()` accept the
+  displayed revision and refuse when the draft moved in the meantime.
+
+- Refuse to discard while a committed-but-unpushed publish is waiting: returning
+  to HEAD there would not be a return to the last published state.
+
+- Add draft provenance as information only — `app`, `agent` or `unknown`, in a
+  gitignored marker cleared by publish and discard. It never gates an operation
+  and is never the audit record.
 
 - Extend the CLI with `review`, `discard` and `origin` so an agent observes and
   acts on exactly the same draft state as the app UI.

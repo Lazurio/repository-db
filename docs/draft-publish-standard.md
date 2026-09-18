@@ -1,214 +1,211 @@
 # Draft & Publish standard for repository-db-backed v3 apps
 
-Every repository-db app has the same operational lifecycle: humans edit through an
-app UI, agents edit the same canonical YAML through the filesystem and Git, both
-produce a **draft** in the mounted data checkout, and a person turns that draft
-into a **published** audited commit. This document is the single normative
-standard for how that lifecycle is presented, reviewed, reverted and published.
+Every repository-db app has the same lifecycle: people edit through an app UI,
+agents edit the same canonical YAML through the filesystem and Git, both produce
+a **draft** in the mounted data checkout, and a person turns that draft into a
+**published** commit. This document is the normative standard for how that
+lifecycle is presented, reviewed, reverted and published.
 
-It supersedes the two earlier contract slices as the primary entry point:
-[`draft-publish-card-contract.md`](draft-publish-card-contract.md) (the card
-view-model) and [`review-surface-contract.md`](review-surface-contract.md) (the
-resource/change types). Those documents remain the detailed type references; this
-one states what an application must do.
+It is deliberately small. Where something cannot be supported simply and safely,
+the standard says so and the app does not offer it, rather than growing another
+mechanism. [`draft-publish-card-contract.md`](draft-publish-card-contract.md) and
+[`review-surface-contract.md`](review-surface-contract.md) remain the detailed
+type references for the shapes used here.
 
-## The product problem this solves
+## The product problem
 
-A normal user must be able to answer four questions without opening Git:
+A person must be able to answer four questions without opening Git:
 
-1. **Is anything unpublished right now?** — otherwise people forget to publish and
-   their colleagues never see the work.
+1. **Is anything unpublished right now?**
 2. **What exactly changed, in business language?** — `data/deals/deal-1002.yaml`
-   is not an answer; "Deal ANTANA Group — Status: Interested → Price offer" is.
-3. **Who or what changed it — me, a colleague, or an agent working outside the
-   app?** — reviewing your own typing and reviewing an agent's proposal are
-   different activities.
-4. **How do I undo something I did not want?** — an unwanted change must be
-   revertible from the app, per record or as a whole draft.
+   is not an answer; "ANTANA Group — Stav: Interested → Price offer" is.
+3. **Where did the change come from?** — the app, an agent, or not known.
+4. **How do I take back something I did not want?**
+
+## Six rules
+
+These govern everything below. Where an older plan says otherwise, these win.
+
+1. **One data checkout is one shared draft, and it publishes as a whole.** There
+   is no selective publish and no per-author draft. The UI says this plainly, so
+   nobody expects to send "just their part".
+2. **A confirmation applies to the version that was shown.** The panel receives a
+   draft revision with the review and hands it back when publishing or
+   discarding. If the draft moved in between, the operation does not run and the
+   panel offers a refreshed view. This is a revision check, not a review history
+   and not an approval workflow.
+3. **Reverting has a simple, predictable scope**: one record (one canonical file)
+   or the whole draft. Nothing in between. Where that does not hold, the action
+   is not offered and the reason is shown. Unrelated changes are never touched.
+4. **Provenance is information only.** It never decides whether an operation is
+   allowed or whether a discard is safe. When it is not reliably known, the UI
+   says "neznámý" instead of guessing at an author.
+5. **An unsent commit is not a draft.** After a commit succeeds and the push
+   fails, the user finishes sending that commit; returning to HEAD is not
+   "returning to the last published version" and is not offered as such. A
+   blocked state still shows the changes and offers one clear next step.
+6. **Mission Control is not migrated yet.** Deals proves the whole flow first;
+   only then is the smallest unification path assessed, and only if it preserves
+   Mission Control's existing guarantees. A consistent look is not a reason to
+   rewrite a data model.
 
 ## Vocabulary
 
 | Term | Meaning |
 | --- | --- |
-| **Draft** | Uncommitted change in the mounted data checkout (working tree). The single shared unit of unpublished work. |
-| **Resource** | The user-facing object a change belongs to (deal, quote, company, plan, item). Identified by a stable id, never by a path. |
-| **Origin** | Best-effort provenance hint of a change: `app` (written through the app API by an identified person), `agent` (written by a task agent), `external` (any other filesystem/Git write). Advisory, never an authorization input. |
-| **Publish** | The one explicit action turning the draft into a validated, audited commit and pushing it. Always the Principal's act. |
-| **Discard** | Returning one resource, one path or the whole draft to the last published state. |
+| **Draft** | All uncommitted changes in the mounted data checkout. One shared unit. |
+| **Draft revision** | Identity of the draft as displayed; a confirmation is bound to it. |
+| **Record** | One canonical data file, shown by its business label. |
+| **Origin** | Where a change came from: `app`, `agent` or `unknown`. Information only. |
+| **Publish** | The one explicit action turning the whole draft into a validated, audited commit and pushing it. The Principal's act. |
+| **Discard** | Returning one record, or the whole draft, to the published state. |
 
 **Paths in this document are relative to the data checkout**, which a module
-mounts at `db/`. A path written here as `data/deals/deal-1002.yaml` is therefore
-`db/data/deals/deal-1002.yaml` seen from the module root. It is not the module's
-own `data/` directory — in a module that still carries a v2 layer, `data/v2/` is
-legacy v2 data and `db/` is the v3 repository-db mount. The two never mix.
+mounts at `db/`. A path written here as `data/deals/deal-1002.yaml` is
+`db/data/deals/deal-1002.yaml` from the module root. It is not the module's own
+`data/` directory — in a module that still carries a v2 layer, `data/v2/` is
+legacy v2 data and `db/` is the v3 repository-db mount.
 
-## Architecture: four layers
+## Architecture
 
 ```
-┌─ App screens ─────────────── inline "Rozpracováno" chips (useDraftResources)
-├─ @lazurio/repository-db-ui ─ floating Draft & Publish card (React)
-├─ Host app API ───────────── /api/<app>/draft/{status,review,discard,publish} + SSE
-└─ @lazurio/repository-db ─── status · review() · discard() · publish() · CLI
+app screens ──────────── inline "Rozpracováno" marks
+shared card ──────────── one draft, its changes, publish / revert
+host app API ─────────── /api/<app>/draft/{status,review,discard,publish}
+repository-db engine ─── status · review() · discard() · publish() · CLI
 ```
 
-Rules:
+- The engine owns Git truth, the review computation, discard and publish. No UI,
+  no business schemas.
+- The app supplies three things only: a review adapter (paths → business labels
+  and routes), routing, and authorization of its endpoints.
+- An app does not implement its own draft state priority, discard logic or
+  publish path.
 
-- The engine owns Git/filesystem truth, structural diffing, discard and publish.
-  It never renders UI and never contains business schemas.
-- The UI package owns the visual card and the inline chip hook. It is React
-  because every v3 app is React; a non-React host may consume the view-model
-  directly.
-- The host app owns only three things: the **review adapter** (paths → resources,
-  labels, routes, field labels), the **routing hook**, and **authorization** of
-  mutating endpoints.
-- An app must not implement its own draft state priority, its own discard logic
-  or its own publish path.
+## The write contract — the same for the app and for an agent
 
-## 1. Engine contract
+Both writers work on the same shared draft and follow the same three steps:
 
-### `status()` / `deriveDraftPublishCard()`
+1. **Write the canonical file** in the data checkout. No commit on save.
+2. **Record the origin** of the write: the app calls `recordOrigin` after its API
+   write; an agent runs `repository-db origin --kind agent --actor "…"`. A write
+   that skips this step is not rejected — it simply shows as `unknown`.
+3. **Do not publish on your own.** An agent publishes only on the Principal's
+   explicit instruction in the current thread, and says in its handoff where the
+   changes are: "změny jsou v draftu aplikace *X* — otevři kartu vpravo dole,
+   zkontroluj je a publikuj, nebo mi řekni *Publikuj*".
 
-State priority, identical in every app:
+Neither writer holds a private draft, and neither can publish a subset.
 
-`conflict` > `draft` (dirty working tree) > `pending` (host-level pending review)
-> `pending` (committed, not pushed) > `remote` (newer data available) >
-`published`.
+## Engine surface
 
-### `review(options?): ReviewSurfaceSnapshot`
+### `review()`
 
-Turns the current dirty set into reviewable resources:
+Resolves dirty paths into resources: business label, app route, structural
+before/after field summary, origin, and the draft revision. Resolution goes
+through the app adapter; if no adapter matches, the change appears as a generic
+document diff, and if the document cannot be parsed, as a technical file diff.
+**A change is never hidden** — a dropped path is a path that reaches publish
+unreviewed.
 
-1. collect dirty/untracked/generated paths from `status()`;
-2. resolve each path through the registered adapter (glob match) into a
-   `ReviewableResource` with a stable id, human label and route target;
-3. parse `HEAD` and working-tree versions of the document and emit
-   `ReviewFieldSummary` rows (`beforeSummary` → `afterSummary`);
-4. attach the origin hint;
-5. on any failure step down the fallback ladder — `resource_adapter` →
-   `generic_schema_diff` → `technical_file_diff` → `unknown`.
+### `discard({ scope, expectedRevision })`
 
-**A change is never hidden because no adapter matched it.** A missing adapter is
-a degraded review state, not an invisible one.
+`scope` is `{ kind: "record", path }` or `{ kind: "draft" }`. The whole-draft
+scope returns everything, including staged edits and renames. The record scope
+returns exactly one canonical file and touches nothing else.
 
-### `discard(target)`
+A record revert is **not offered** when:
 
-| Target | Behavior |
+| Situation | Why |
 | --- | --- |
-| a resource / path set | `git checkout HEAD -- <path>` for tracked files, delete for untracked ones |
-| the whole draft | the same over the current dirty set — never `conflict --abort` |
+| generated data is also in the draft | reverting one record alone would leave it inconsistent |
+| the record was renamed in the draft | reverting one side would leave the other behind |
+| the path is generated output | it is rebuilt on publish; revert its source record |
+| the path is not canonical data | not a record |
+| a commit is waiting to be sent | HEAD is not the published state (rule 5) |
+| the repository is in conflict | recovery finishes first; the draft stays visible |
 
-- runs under the same lock as publish; refuses to run in `conflict` state;
-- declared generated artifacts are discarded together with the source that
-  produced them;
-- when the target contains changes whose origin is not the requesting actor, the
-  engine fails with `foreign_change_requires_confirm` and the host must re-issue
-  the call with an explicit confirmation flag. This is a safety prompt, not an
-  access control decision.
+`canRevertRecord()` answers this before the UI draws a button, so a user is never
+offered an action that then refuses.
 
-### Origin tracking
+### `publish({ actor, source, expectedRevision })`
 
-Origin lives in the gitignored `.repository-db/draft-origin.json`, written when a
-change enters through a known path (app API, agent CLI) and reconciled with the
-dirty set on read; an unknown path is `external`. It is cleared by publish and by
-discard. It is a hint for humans: never a permission, never an audit record — the
-audit record is the publish commit and its trailers.
-
-The coarse draft owner marker (`.repository-db/draft-owner.json`, set on the first
-write after a publish, cleared by publish) stays as the summary label for the
-whole draft.
+Unchanged in its guarantees (validate → materialize → rebase → one audited commit
+→ push), plus the revision check. The whole draft goes out as one commit.
 
 ### CLI parity
 
-Everything the card can do, an agent can do headlessly, and both see the same
-truth:
-
 ```bash
-repository-db review  [--json] [--inputs]
-repository-db discard (--path <p>... | --all) [--actor <actor>] [--confirm-foreign] [--json]
-repository-db origin  --path <p>... --kind app|agent|external --actor <actor> [--source <s>]
+repository-db review  [--json]
+repository-db discard (--record <path> | --draft) [--revision <draft-revision>]
+repository-db origin  --path <p>... --kind app|agent --actor <actor>
 repository-db publish --actor "…" --source "…"
 ```
 
-An agent stamps its own writes with `origin --kind agent` so a reviewer can tell
-them apart from writes made by a person inside the app.
-
-## 2. Host API convention
-
-Each app exposes these routes as a thin wrapper — authorization and identity
-only, no state logic:
+## Host API convention
 
 | Route | Purpose |
 | --- | --- |
-| `GET /api/<app>/draft/status` | card snapshot (view-model + counts + freshness) |
-| `GET /api/<app>/draft/review` | review snapshot (resources, fields, origins) |
-| `POST /api/<app>/draft/discard` | `{ resourceIds? , paths?, all?, confirmForeign? }` |
-| `POST /api/<app>/draft/publish` | explicit publish, host credential policy |
-| `GET /api/<app>/draft/events` | SSE: `draft-changed`, `conflict`, `remote-data-pulled` |
+| `GET /api/<app>/draft/status` | card state, counts, draft revision |
+| `GET /api/<app>/draft/review` | resources, field diffs, origins, revision |
+| `POST /api/<app>/draft/discard` | `{ scope, expectedRevision }` |
+| `POST /api/<app>/draft/publish` | `{ expectedRevision }` |
+| `GET /api/<app>/draft/events` | SSE: draft changed, conflict, remote pulled |
 
-Publish and pull stay explicit and fail-closed. No browser-owned automatic
-publish or pull loop exists in any app.
+A stale revision returns a conflict response carrying the current one, so the
+panel can refresh and let the user decide again. Publish and pull stay explicit
+and fail-closed; no browser-owned automatic loop exists.
 
-## 3. UI standard
+## UI standard
 
-The card is a **floating card in the bottom-right corner**, present on every main
-screen of the app.
+A floating card in the bottom-right corner, on every main screen.
 
-**Collapsed pill**
-
-| Tone | Pill | Note |
+| State | Pill | Panel |
 | --- | --- | --- |
-| published | quiet dot + "Publikováno" | persistent in business apps, silent-when-clean allowed for admin tooling |
-| draft | "Rozpracováno · N · <age>" | age is the time since the oldest unpublished change |
-| pending | "Dokončit odeslání" | commit exists, push missing |
-| remote | "Novější data" | only actionable when `pullSafe` |
-| conflict | "Konflikt" | blocking, red |
+| published | "Publikováno" | last publish info |
+| draft | "Rozpracováno · N" | the changes, **Publikovat vše** and **Zahodit vše** |
+| unsent commit | "Čeká na odeslání" | the changes, **Dokončit odeslání** only |
+| newer data | "Novější data" | **Stáhnout** when safe |
+| conflict | "Konflikt" | the changes stay visible, one clear next step |
 
-**Expanded panel**
+The panel states that publishing sends the whole draft. Each row shows the origin
+(`V aplikaci` / `Agent` / `Neznámý`), the change kind, the business label, the
+changed fields, **Otevřít** and — where supported — **Vrátit**; where it is not
+supported the row explains why instead. Technical paths live behind a details
+disclosure. Inline marks in list and detail screens use the same resource ids.
 
-- changes grouped by resource type, each row: origin icon, change kind (Nový /
-  Upraveno / Smazáno / Generováno), human label, changed-field summary
-  (`Status: Interested → Price offer`), **Otevřít** (app route) and **Vrátit**;
-- footer: **Zahodit vše** (confirmation with an explicit list) and
-  **Publikovat**;
-- a "Technické detaily" disclosure holding data-repo paths and the raw diff, for
-  agents, Git review and power users — never the primary label;
-- conflict state replaces the list with the engine handoff text and the recovery
-  actions.
+## What the pilot supports
 
-**Inline in the app** — `useDraftResources()` exposes the same resource ids so
-list rows and detail screens can carry a "Rozpracováno" chip. Draft highlighting
-is always on for dirty resources; the card is a navigation and publish surface,
-not the only place draft state is visible.
+**Supported**
 
-**Language** — the shared package ships Czech user copy with English machine
-reasons. Hosts may override labels; they may not override state semantics.
+- one shared draft per data checkout, published as a whole;
+- business-language review of changed records with before/after fields;
+- jumping from a change to the record in the app;
+- reverting one record (one canonical file) or the whole draft;
+- confirmation bound to the displayed revision, for publish and discard;
+- origin shown as app / agent / unknown;
+- unsent commits and conflicts as distinct, clearly explained states.
 
-## 4. Agent obligations
+**Not supported yet — deliberately**
 
-An agent working in a repository-db mount:
+- selective publish of part of a draft;
+- per-author drafts or per-author attribution of individual changes;
+- reverting a single field (an ordinary write of the baseline value instead);
+- reverting a record spanning several files, or one involved in a rename;
+- reverting a record while generated data is in the draft;
+- reviewed-state persistence and approval workflows;
+- Mission Control's changeset model — see rule 6.
 
-- writes canonical YAML as usual and **does not publish** without the
-  Principal's explicit instruction in the current thread;
-- identifies itself when writing through the CLI so the origin hint is `agent`;
-- ends its handoff by naming where the review happens: "změny jsou v draftu
-  aplikace *X* — otevři kartu vpravo dole, zkontroluj je a publikuj, nebo mi
-  řekni *Publikuj*".
+## Relation to earlier plans
 
-The module `AGENTS.md` of every repository-db-backed module carries that
-sentence.
+This standard supersedes the parts of the earlier plans that conflict with it.
 
-## Conformance checklist
-
-A repository-db-backed v3 app conforms when:
-
-1. it renders the shared card from `@lazurio/repository-db-ui` on every main
-   screen;
-2. it registers a review adapter for every canonical collection it writes;
-3. all four card actions go through the host API into the engine — no second
-   write path;
-4. a change with no adapter still appears, as a technical file diff;
-5. discarding a resource and the whole draft works from the UI, with confirmation
-   for foreign-origin changes;
-6. inline chips mark dirty resources in lists and detail screens;
-7. no app-local draft state priority, discard implementation or publish path
-   remains in the codebase.
+- **DEV-6383 (review surface)** — the contract, the fallback ladder and the
+  "never hide a change" rule are kept. Reviewed-state persistence, an adapter
+  registry and shared panel primitives are out of the pilot.
+- **DEV-6392 (Deals draft UX and revert)** — the revert ladder is narrowed to
+  record and whole draft; no field revert primitive, no dependency handling. Its
+  no-per-change-attribution decision stands: origin is a hint, not authorship.
+- **DEV-6418 (draft publish card)** — the shared card and state priority are
+  kept. Its expectation that Mission Control converges onto the shared model is
+  deferred by rule 6.

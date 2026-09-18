@@ -11,7 +11,9 @@ import {
 	type DiscardOptions,
 	type DiscardResult,
 	discardDraft,
+	recordRevertAvailability,
 } from "./discard.ts";
+import { computeDraftRevision } from "./draftRevision.ts";
 import {
 	type DraftOriginKind,
 	type DraftOwner,
@@ -104,17 +106,30 @@ export class RepositoryDb {
 	}
 
 	/**
-	 * Return draft work to the last published state, per path or as a whole.
-	 * Refuses changes the requesting actor cannot claim unless the caller
-	 * confirms explicitly.
+	 * Identity of the draft as it currently stands. The panel shows a draft with
+	 * its revision and hands it back on publish or discard, so a confirmation
+	 * always applies to the version the user actually saw.
 	 */
-	discard(options: DiscardOptions = {}): DiscardResult {
+	draftRevision(): string {
+		return computeDraftRevision(this.mountRoot);
+	}
+
+	/**
+	 * Return draft work to the published state: one canonical record, or the
+	 * whole draft. Runs only if the draft still matches the displayed revision.
+	 */
+	discard(options: DiscardOptions): DiscardResult {
 		return discardDraft(this.mountRoot, this.config, options);
+	}
+
+	/** Can this record be reverted on its own right now, and if not, why not? */
+	canRevertRecord(relativePath: string): { supported: boolean; reason?: string } {
+		return recordRevertAvailability(this.mountRoot, this.config, relativePath);
 	}
 
 	/**
 	 * Record where a write came from, right after the host API or CLI performed
-	 * it. Advisory provenance only; never an authorization input.
+	 * it. Information only; it never gates an operation.
 	 */
 	recordOrigin(
 		paths: readonly string[],

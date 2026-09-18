@@ -73,16 +73,18 @@ export {
 export * from "./types.ts";
 export {
 	discardDraft,
-	ForeignChangeError,
+	recordRevertAvailability,
+	DraftChangedError,
+	RevertNotSupportedError,
 	type DiscardOptions,
 	type DiscardResult,
-	type DiscardedPath,
+	type DiscardScope,
 } from "./discard.ts";
+export { computeDraftRevision } from "./draftRevision.ts";
 export {
 	clearDraftOrigins,
 	clearDraftOwner,
 	clearDraftProvenance,
-	isForeignChange,
 	readDraftOrigins,
 	readDraftOwner,
 	recordDraftOrigin,

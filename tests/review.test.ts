@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { resolveDraftOrigins } from "../src/origin.ts";
 import { globToRegExp } from "../src/review.ts";
 import { RepositoryDb } from "../src/repositoryDb.ts";
 import { structuralDiff } from "../src/structuralDiff.ts";
@@ -200,6 +201,106 @@ describe("review surface engine", () => {
 			expect(snapshot.resources.every((r) => r.changes[0]?.kind === "created")).toBe(true);
 			// Coarse owner label: the first writer after the last publish.
 			expect(db.draftOwner()?.actor).toBe(ANNA);
+		} finally {
+			rmSync(fixture.root, { recursive: true, force: true });
+		}
+	});
+
+	test("keeps a change visible when an adapter silently drops it", async () => {
+		const fixture = createFixtureRepo();
+		try {
+			const db = RepositoryDb.open(fixture.mountPath);
+			writeFixtureDocument(fixture.mountPath, "handled", { name: "Handled" });
+			writeFixtureDocument(fixture.mountPath, "dropped", { name: "Dropped" });
+
+			// A filtering adapter: claims the glob, returns a resource for only one
+			// of the two inputs it was handed.
+			const partialAdapter: ReviewSurfaceAdapter = {
+				...thingAdapter,
+				id: "partial-adapter",
+				toReviewableResources(changes) {
+					const kept = changes.filter((change) =>
+						change.technicalRefs[0]?.path.includes("handled"),
+					);
+					return thingAdapter.toReviewableResources(kept) as ReviewableResource[];
+				},
+			};
+
+			const snapshot = await db.review({ adapters: [partialAdapter] });
+
+			expect(snapshot.resources).toHaveLength(2);
+			const byId = new Map(
+				snapshot.resources.map((resource) => [resource.stableResourceId, resource]),
+			);
+			expect(byId.get("thing:handled")?.fallback.activeLevel).toBe("resource_adapter");
+			// The dropped input must reappear on the generic rung, not vanish.
+			expect(byId.get("path:data/things/dropped.yaml")?.fallback.activeLevel).toBe(
+				"generic_schema_diff",
+			);
+			expect(snapshot.fallback.steps[0]?.reason).toContain("dropped.yaml");
+		} finally {
+			rmSync(fixture.root, { recursive: true, force: true });
+		}
+	});
+
+	test("shows an unparseable draft of a published record as a technical diff", async () => {
+		const fixture = createFixtureRepo();
+		try {
+			const db = RepositoryDb.open(fixture.mountPath);
+			writeFixtureDocument(fixture.mountPath, "delta", { name: "Delta" });
+			git(fixture.mountPath, ["add", "--all"]);
+			git(fixture.mountPath, ["commit", "--message", "baseline"]);
+
+			// The record still exists, its draft is just not valid YAML right now.
+			writeFileSync(
+				path.join(fixture.mountPath, "data/things/delta.yaml"),
+				"name: [unclosed\n\tbroken: true\n",
+				"utf8",
+			);
+
+			const snapshot = await db.review();
+			const resource = snapshot.resources[0];
+
+			expect(resource?.changes[0]?.kind).toBe("modified");
+			// Must not be rendered as a deleted document.
+			expect(resource?.fallback.activeLevel).toBe("technical_file_diff");
+			expect(resource?.changes[0]?.fields).toEqual([]);
+		} finally {
+			rmSync(fixture.root, { recursive: true, force: true });
+		}
+	});
+
+	test("resolving origins never rewrites the marker on the read path", async () => {
+		const fixture = createFixtureRepo();
+		try {
+			const db = RepositoryDb.open(fixture.mountPath);
+			writeFixtureDocument(fixture.mountPath, "raced", { name: "Raced" });
+			db.recordOrigin(["data/things/raced.yaml"], { kind: "app", actor: ANNA });
+
+			// Simulates the host sequence "write file, then record origin" racing a
+			// review that listed the dirty set before the write: a pruning read
+			// would delete the fresh hint and report the writer's own change as
+			// external.
+			resolveDraftOrigins(fixture.mountPath, []);
+
+			const snapshot = await db.review();
+			expect(snapshot.resources[0]?.changes[0]?.origin?.kind).toBe("app");
+			expect(snapshot.resources[0]?.changes[0]?.origin?.actor).toBe(ANNA);
+		} finally {
+			rmSync(fixture.root, { recursive: true, force: true });
+		}
+	});
+
+	test("reports an unrecorded write as unknown rather than guessing", async () => {
+		const fixture = createFixtureRepo();
+		try {
+			const db = RepositoryDb.open(fixture.mountPath);
+			// A plain filesystem edit with nothing recorded about it.
+			writeFixtureDocument(fixture.mountPath, "mystery", { name: "Mystery" });
+
+			const snapshot = await db.review();
+			expect(snapshot.resources[0]?.changes[0]?.origin?.kind).toBe("unknown");
+			expect(snapshot.resources[0]?.changes[0]?.origin?.actor).toBeUndefined();
 		} finally {
 			rmSync(fixture.root, { recursive: true, force: true });
 		}

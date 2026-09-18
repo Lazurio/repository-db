@@ -109,13 +109,25 @@ function changeKindOf(
 	return "unknown";
 }
 
-/** YAML is a JSON superset here, so one parser covers both canonical formats. */
-function parseDocument(content: string | undefined): unknown {
-	if (content === undefined) return undefined;
+type ParsedDocument =
+	| { status: "absent" }
+	| { status: "parsed"; value: unknown }
+	| { status: "unparseable" };
+
+/**
+ * YAML is a JSON superset here, so one parser covers both canonical formats.
+ *
+ * The three outcomes are kept distinct on purpose: a document that fails to
+ * parse is not the same as a document that is not there. Collapsing them would
+ * render a record whose draft is currently invalid as "deleted" to the
+ * reviewer, which is both wrong and alarming.
+ */
+function parseDocument(content: string | undefined): ParsedDocument {
+	if (content === undefined) return { status: "absent" };
 	try {
-		return parseYaml(content);
+		return { status: "parsed", value: parseYaml(content) };
 	} catch {
-		return undefined;
+		return { status: "unparseable" };
 	}
 }
 
@@ -218,10 +230,19 @@ function genericResource(
 	const relativePath = input.technicalRefs[0]?.path ?? "";
 	const baseline = parseDocument(headContent(mountRoot, relativePath));
 	const draft = parseDocument(workingContent(mountRoot, relativePath));
-	const parseable = baseline !== undefined || draft !== undefined;
+	// Either side failing to parse means the structural diff would be a lie, so
+	// the change degrades to technical evidence instead.
+	const parseable =
+		baseline.status !== "unparseable" &&
+		draft.status !== "unparseable" &&
+		(baseline.status === "parsed" || draft.status === "parsed");
 
 	const diff = parseable
-		? structuralDiff(baseline, draft, { maxFields })
+		? structuralDiff(
+				baseline.status === "parsed" ? baseline.value : undefined,
+				draft.status === "parsed" ? draft.value : undefined,
+				{ maxFields },
+			)
 		: { fields: [], truncated: 0 };
 	const level: ReviewFallbackLevel = parseable
 		? "generic_schema_diff"
@@ -263,6 +284,21 @@ function genericResource(
 			input.technicalRefs,
 		),
 	};
+}
+
+/**
+ * Change ids an adapter's output actually accounts for, by explicit change id or
+ * by the technical path it carries.
+ */
+function coveredChangeIds(resources: readonly ReviewableResource[]): Set<string> {
+	const covered = new Set<string>();
+	for (const resource of resources) {
+		for (const change of resource.changes) {
+			covered.add(change.changeId);
+			for (const ref of change.technicalRefs) covered.add(`path:${ref.path}`);
+		}
+	}
+	return covered;
 }
 
 /** Attach provenance to adapter output that did not carry it through. */
@@ -363,6 +399,7 @@ export async function computeReviewSnapshot(
 	const remaining = new Map(inputs.map((input) => [input.changeId, input]));
 	const resources: ReviewableResource[] = [];
 	const adapterFailures: string[] = [];
+	const adapterGaps: string[] = [];
 
 	for (const adapter of options.adapters ?? []) {
 		const globs = adapter.supportedPathGlobs ?? [];
@@ -375,7 +412,19 @@ export async function computeReviewSnapshot(
 			const produced = await adapter.toReviewableResources(matched);
 			backfillOrigins(produced, matched);
 			resources.push(...produced);
-			for (const input of matched) remaining.delete(input.changeId);
+			// An adapter that quietly returns fewer resources than the inputs it
+			// was handed — a filter, a dedupe, a buggy early return — must not be
+			// able to make a dirty path disappear. Only inputs the output actually
+			// references are considered handled; the rest fall through to the
+			// generic rung, which is the whole point of the ladder.
+			const covered = coveredChangeIds(produced);
+			for (const input of matched) {
+				if (covered.has(input.changeId)) remaining.delete(input.changeId);
+				else
+					adapterGaps.push(
+						`${adapter.id} claimed ${input.technicalRefs[0]?.path ?? input.changeId} but produced no resource for it`,
+					);
+			}
 		} catch (error) {
 			// An adapter failure must not swallow the changes it claimed: they fall
 			// through to the generic rung so they stay visible and reviewable.
@@ -398,8 +447,8 @@ export async function computeReviewSnapshot(
 		publishReadiness: publishReadiness(mountRoot, config, resources),
 		fallback: ladder(
 			snapshotLevel,
-			adapterFailures.length > 0
-				? `Adaptér selhal, změny spadly na obecnou úroveň: ${adapterFailures.join("; ")}`
+			[...adapterFailures, ...adapterGaps].length > 0
+				? `Adaptér nepokryl všechny změny, spadly na obecnou úroveň: ${[...adapterFailures, ...adapterGaps].join("; ")}`
 				: undefined,
 		),
 		inputChanges: options.includeInputChanges ? inputs : undefined,

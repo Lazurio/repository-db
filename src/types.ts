@@ -189,14 +189,15 @@ export interface ReviewFieldSummary {
 }
 
 /**
- * Best-effort provenance of a draft change: written through an app API by an
- * identified person, written by a task agent, or written outside the
- * application (plain filesystem/Git edit, or no recorded hint at all).
+ * Where a draft change came from, as far as the engine can tell: written in the
+ * app, written by an agent, or not reliably known.
  *
- * Advisory only. It is never an authorization input and never the audit
- * record — that remains the publish commit and its trailers.
+ * Information only. Provenance never gates an operation, never decides whether
+ * a discard is safe and is never the audit record — that remains the publish
+ * commit and its trailers. When in doubt the answer is `unknown`, and the UI
+ * says so plainly rather than guessing at an author.
  */
-export type ReviewChangeOriginKind = "app" | "agent" | "external";
+export type ReviewChangeOriginKind = "app" | "agent" | "unknown";
 
 export interface ReviewChangeOrigin {
 	kind: ReviewChangeOriginKind;
@@ -222,7 +223,7 @@ export interface ResourceChange {
 	draftContentHash?: string;
 	/** Source technical refs for generated outputs, when known. */
 	generatedFrom?: ReviewTechnicalReference[];
-	/** Advisory provenance hint for the reviewer; never an authorization input. */
+	/** Informational provenance; never gates an operation. */
 	origin?: ReviewChangeOrigin;
 }
 
@@ -244,7 +245,7 @@ export interface ReviewInputChange {
 	baselineContentHash?: string;
 	/** Source technical refs for generated outputs, when known. */
 	generatedFrom?: ReviewTechnicalReference[];
-	/** Advisory provenance hint for the reviewer; never an authorization input. */
+	/** Informational provenance; never gates an operation. */
 	origin?: ReviewChangeOrigin;
 	/** Non-secret JSON metadata for diagnostics; not a UI label. */
 	metadata?: JsonObject;
@@ -429,6 +430,12 @@ export interface CommitTrailers {
 export interface PublishOptions {
 	/** Human actor recorded in the commit trailers, e.g. `Jana <jana@firma.cz>`. */
 	actor: string;
+	/**
+	 * Revision of the draft the user confirmed. When present, publish runs only
+	 * if the draft still looks exactly like that; otherwise it refuses and the
+	 * panel refreshes. A headless caller with nothing displayed may omit it.
+	 */
+	expectedRevision?: string;
 	/** Producing surface, e.g. `sample-app-v1` or `repository-db-cli`. */
 	source: string;
 	/** Optional human summary used as the first commit-message line. */

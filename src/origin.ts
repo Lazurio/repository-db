@@ -13,10 +13,10 @@ import { toStableJson, writeFileAtomic } from "./yamlIo.ts";
  * different activities, so the engine records a best-effort hint of where each
  * dirty path came from.
  *
- * Hard boundary: this is advisory only. It is never an authorization input and
- * never an audit record — the audit record is the publish commit and its
- * trailers. A path with no recorded provenance is reported as `external`, which
- * is the conservative answer, not an accusation.
+ * Hard boundary: this is information, nothing else. It never gates an
+ * operation, never decides whether a discard is safe and is never the audit
+ * record — that remains the publish commit and its trailers. A path with no
+ * recorded hint is reported as `unknown`, and the UI says exactly that.
  *
  * Both markers live in the gitignored engine layer, so they never reach the
  * data repository, and both are cleared by publish and by discard.
@@ -133,13 +133,39 @@ export function clearDraftOrigins(mountRoot: string, paths?: readonly string[]):
 
 /**
  * Resolve provenance for the current dirty set. Paths without a hint resolve to
- * `external`; stale hints for paths that are no longer dirty are pruned so the
- * marker cannot grow without bound or describe already published work.
+ * `external`.
+ *
+ * Strictly read-only. Pruning here would race the ordinary host sequence
+ * "write the file, then record the origin": a review that listed the dirty set
+ * before the write but read the marker after the record would delete the fresh
+ * hint, and the writer's own change would come back as `external` — and then
+ * demand a foreign-change confirmation to discard. Pruning belongs to
+ * {@link pruneDraftOrigins}, called under the publish lock.
  */
 export function resolveDraftOrigins(
 	mountRoot: string,
 	dirtyPaths: readonly string[],
 ): Map<string, DraftOriginRecord> {
+	const file = readOriginFile(mountRoot);
+	const resolved = new Map<string, DraftOriginRecord>();
+	for (const entry of dirtyPaths) {
+		resolved.set(
+			entry,
+			file.entries[entry] ?? { kind: "unknown", recordedAt: "" },
+		);
+	}
+	return resolved;
+}
+
+/**
+ * Drop hints for paths that are no longer part of the draft, so the marker
+ * cannot grow without bound or describe already published work. Call only from
+ * a writer that holds the publish lock.
+ */
+export function pruneDraftOrigins(
+	mountRoot: string,
+	dirtyPaths: readonly string[],
+): void {
 	const file = readOriginFile(mountRoot);
 	const dirty = new Set(dirtyPaths);
 	let pruned = false;
@@ -149,31 +175,6 @@ export function resolveDraftOrigins(
 		pruned = true;
 	}
 	if (pruned) writeOriginFile(mountRoot, file);
-
-	const resolved = new Map<string, DraftOriginRecord>();
-	for (const entry of dirtyPaths) {
-		resolved.set(
-			entry,
-			file.entries[entry] ?? { kind: "external", recordedAt: "" },
-		);
-	}
-	return resolved;
-}
-
-/**
- * Is this change foreign to the requesting actor?
- *
- * Deliberately fails toward "yes": unknown provenance, an external write, a
- * hint without an actor, or a request without an actor all count as foreign, so
- * a destructive discard asks before touching work the caller cannot claim.
- */
-export function isForeignChange(
-	record: DraftOriginRecord | undefined,
-	requestingActor: string | undefined,
-): boolean {
-	if (!record || record.kind === "external" || !record.actor) return true;
-	if (!requestingActor) return true;
-	return record.actor !== requestingActor;
 }
 
 export function readDraftOwner(mountRoot: string): DraftOwner | undefined {
