@@ -25,6 +25,13 @@ export interface DraftPanelRecordInput {
 	revert: { supported: boolean; reason?: string };
 }
 
+export interface DraftPanelConflict {
+	/** What happened, in the user's language. */
+	message: string;
+	/** Recovery handoff text for an agent or a developer. */
+	handoff?: string;
+}
+
 export interface DraftPanelInput {
 	revision: string;
 	state: "conflict" | "draft" | "committed_not_pushed" | "pull_needed" | "published";
@@ -32,6 +39,8 @@ export interface DraftPanelInput {
 	ahead?: number;
 	behind?: number;
 	draftOwner?: { actor: string } | null;
+	/** Present when the checkout is in a conflict the user has to resolve. */
+	conflict?: DraftPanelConflict | null;
 	publishReadiness?: PublishReadinessSummary;
 	records: DraftPanelRecordInput[];
 }
@@ -61,7 +70,13 @@ export interface DraftPanelRecord {
 }
 
 export interface DraftPanelAction {
-	kind: "publish" | "discard_draft" | "finish_send" | "pull" | "resolve_conflict";
+	kind:
+		| "publish"
+		| "discard_draft"
+		| "finish_send"
+		| "pull"
+		| "abort_conflict"
+		| "mark_conflict_resolved";
 	label: string;
 	enabled: boolean;
 	/** Why it is disabled; shown next to the action rather than hidden. */
@@ -82,6 +97,7 @@ export interface DraftPanelModel {
 	/** Says out loud that the whole draft goes out together. */
 	wholeDraftNote?: string;
 	ownerNote?: string;
+	conflict?: DraftPanelConflict | null;
 	records: DraftPanelRecord[];
 	actions: DraftPanelAction[];
 	revision: string;
@@ -148,10 +164,18 @@ export function deriveDraftPanel(input: DraftPanelInput): DraftPanelModel {
 			tone: "conflict",
 			pill: "Konflikt",
 			count,
+			conflict: input.conflict ?? null,
 			headline:
+				input.conflict?.message ??
 				"Data se rozešla se serverem. Změny zůstávají vidět, ale publikovat ani vracet teď nejde.",
 			actions: [
-				{ kind: "resolve_conflict", label: "Vyřešit konflikt", enabled: true },
+				{
+					kind: "abort_conflict",
+					label: "Zrušit a vrátit rozpracované změny",
+					enabled: true,
+					destructive: true,
+				},
+				{ kind: "mark_conflict_resolved", label: "Označit za vyřešené", enabled: true },
 				{
 					kind: "publish",
 					label: "Publikovat vše",

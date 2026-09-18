@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- The card's conflict state now carries the engine's own message and recovery
+  handoff and offers the two real actions (abort, mark resolved) instead of one
+  generic button the host had to implement itself.
+
 - `review()` now reports everything that is not published yet, not only the
   dirty working tree: a publish that committed but never reached the server
   stays visible and reviewable instead of disappearing from the card. The

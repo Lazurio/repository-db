@@ -124,13 +124,28 @@ describe("draft panel model", () => {
 		expect(model.records).toHaveLength(1);
 	});
 
-	test("keeps changes visible in a conflict and offers one next step", () => {
-		const model = deriveDraftPanel(input({ state: "conflict" }));
+	test("keeps changes visible in a conflict and offers real recovery actions", () => {
+		const model = deriveDraftPanel(
+			input({
+				state: "conflict",
+				conflict: {
+					message: "Publikaci zastavil konflikt při slučování.",
+					handoff: "repository-db conflict --abort",
+				},
+			}),
+		);
 
 		expect(model.tone).toBe("conflict");
 		expect(model.records).toHaveLength(1);
+		// The user's own words about what happened, plus the recovery detail.
+		expect(model.headline).toBe("Publikaci zastavil konflikt při slučování.");
+		expect(model.conflict?.handoff).toContain("conflict --abort");
+		expect(model.actions.map((action) => action.kind)).toEqual([
+			"abort_conflict",
+			"mark_conflict_resolved",
+			"publish",
+		]);
 		expect(model.actions.find((action) => action.kind === "publish")?.enabled).toBe(false);
-		expect(model.actions[0]?.kind).toBe("resolve_conflict");
 	});
 
 	test("disables publish with the blocking reason attached", () => {

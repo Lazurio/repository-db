@@ -33,8 +33,10 @@ export interface DraftPublishPanelApi {
 	finishSend?(): Promise<void>;
 	/** Pull newer published data. */
 	pull?(): Promise<void>;
-	/** Open the app's conflict recovery surface. */
-	resolveConflict?(): void;
+	/** Abort the failed operation and restore the pre-publish state. */
+	abortConflict?(): Promise<void>;
+	/** Record that the conflict was resolved by hand. */
+	markConflictResolved?(): Promise<void>;
 }
 
 export interface DraftPanelSessionRecovery {
@@ -264,7 +266,24 @@ export function DraftPublishPanel({
 				void run(() => api.pull?.() ?? Promise.resolve(), "Staženo.");
 				return;
 			}
-			if (kind === "resolve_conflict") api.resolveConflict?.();
+			if (kind === "abort_conflict" && api.abortConflict) {
+				if (
+					typeof window !== "undefined" &&
+					!window.confirm(
+						"Zrušit probíhající synchronizaci a vrátit rozpracované změny? Publikovaná data na serveru zůstanou beze změny.",
+					)
+				) {
+					return;
+				}
+				void run(() => api.abortConflict?.() ?? Promise.resolve(), "Synchronizace zrušena.");
+				return;
+			}
+			if (kind === "mark_conflict_resolved" && api.markConflictResolved) {
+				void run(
+					() => api.markConflictResolved?.() ?? Promise.resolve(),
+					"Konflikt označen za vyřešený.",
+				);
+			}
 		},
 		[api, model, run],
 	);
@@ -313,6 +332,12 @@ export function DraftPublishPanel({
 						<p className="rdb-draft-note">{model.wholeDraftNote}</p>
 					)}
 					{model.ownerNote && <p className="rdb-draft-owner">{model.ownerNote}</p>}
+					{model.conflict?.handoff && (
+						<details className="rdb-draft-handoff">
+							<summary>Podrobnosti pro vyřešení</summary>
+							<pre>{model.conflict.handoff}</pre>
+						</details>
+					)}
 					{message && (
 						<p className={`rdb-draft-message rdb-draft-message-${message.tone}`} role="status">
 							{message.text}
