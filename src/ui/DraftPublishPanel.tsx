@@ -29,8 +29,11 @@ export interface DraftPublishPanelApi {
 		scope: { kind: "draft" } | { kind: "record"; path: string },
 		expectedRevision: string,
 	): Promise<void>;
-	/** Finish sending an already committed publish. */
-	finishSend?(): Promise<void>;
+	/**
+	 * Finish sending the commit that was shown. The head is passed through so
+	 * the host can refuse if the pending commit is no longer that one.
+	 */
+	finishSend?(expectedHead: string | undefined): Promise<void>;
 	/** Pull newer published data. */
 	pull?(): Promise<void>;
 	/** Abort the failed operation and restore the pre-publish state. */
@@ -180,8 +183,18 @@ export function DraftPublishPanel({
 	}, [refresh, pollIntervalMs, subscribe]);
 
 	const model: DraftPanelModel | null = useMemo(
-		() => (input ? deriveDraftPanel(input) : null),
-		[input],
+		() =>
+			input
+				? deriveDraftPanel(input, {
+						// Actions the host did not wire are shown as unavailable
+						// instead of as buttons that do nothing.
+						finishSend: Boolean(api.finishSend),
+						pull: Boolean(api.pull),
+						abortConflict: Boolean(api.abortConflict),
+						markConflictResolved: Boolean(api.markConflictResolved),
+					})
+				: null,
+		[input, api],
 	);
 
 	const run = useCallback(
@@ -259,7 +272,10 @@ export function DraftPublishPanel({
 				return;
 			}
 			if (kind === "finish_send" && api.finishSend) {
-				void run(() => api.finishSend?.() ?? Promise.resolve(), "Odesláno.");
+				void run(
+					() => api.finishSend?.(model.pendingHead) ?? Promise.resolve(),
+					"Odesláno.",
+				);
 				return;
 			}
 			if (kind === "pull" && api.pull) {

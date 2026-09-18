@@ -26,7 +26,7 @@ import {
 } from "./generated.ts";
 import { ENGINE_DIR, acquirePublishLock } from "./lock.ts";
 import { clearDraftProvenance } from "./origin.ts";
-import { computeDraftRevision } from "./draftRevision.ts";
+import { computeDraftRevision, draftContentMatches } from "./draftRevision.ts";
 import { DraftChangedError } from "./discard.ts";
 import { buildCommitMessage, newChangeId } from "./trailers.ts";
 import { writeFileAtomic } from "./yamlIo.ts";
@@ -222,10 +222,24 @@ export async function publish(
 	const releaseLock = acquirePublishLock(mountRoot);
 	try {
 		// Under the lock: publishing confirms exactly the draft that was shown.
-		if (options.expectedRevision) {
+		// An empty string is a supplied value, not an absent one — treating it
+		// as "no expectation" would turn a malformed confirmation into an
+		// unguarded publish.
+		if (options.expectedRevision !== undefined) {
 			const currentRevision = computeDraftRevision(mountRoot);
 			if (currentRevision !== options.expectedRevision) {
 				throw new DraftChangedError(currentRevision);
+			}
+		}
+		// Finishing a send is a different operation from publishing: it may only
+		// push the exact commit the user was shown, never make a new one.
+		if (options.expectedHead !== undefined) {
+			const head = gitHeadCommit(mountRoot);
+			if (head !== options.expectedHead) {
+				throw new RepositoryDbError(
+					"head_changed",
+					`The commit waiting to be sent is no longer the one that was shown (expected ${options.expectedHead}, found ${head ?? "none"}). Refresh and decide again.`,
+				);
 			}
 		}
 
@@ -241,6 +255,12 @@ export async function publish(
 		const dirtyPaths = gitDirtyPaths(mountRoot).filter(
 			(entry) => !entry.startsWith(`${ENGINE_DIR}/`),
 		);
+		if (options.finishSendOnly && dirtyPaths.length > 0) {
+			throw new RepositoryDbError(
+				"new_draft_present",
+				"There are draft changes beyond the commit waiting to be sent. Finishing the send would publish them unreviewed; review the draft and publish it explicitly instead.",
+			);
+		}
 		if (dirtyPaths.length === 0) {
 			// Recovery path: a previous publish committed but could not push
 			// (or a conflict was resolved into a local commit). Just push.
@@ -270,6 +290,15 @@ export async function publish(
 
 		// Integrate remote changes before committing the local batch.
 		await integrateRemoteChanges(mountRoot, config, "publish");
+
+		// Second check, at the moment that matters: staging takes the live
+		// working tree, and integration above involved network waits during
+		// which a write could have landed. Only the content part is compared —
+		// integration moves the baseline by design, the user's draft content
+		// must not have moved at all.
+		if (options.expectedRevision !== undefined && !draftContentMatches(mountRoot, options.expectedRevision)) {
+			throw new DraftChangedError(computeDraftRevision(mountRoot));
+		}
 
 		// Stage the publishable batch while preserving the runtime engine layer.
 		stagePublishBatch(mountRoot);

@@ -34,6 +34,8 @@ export interface DraftPanelConflict {
 
 export interface DraftPanelInput {
 	revision: string;
+	/** Commit waiting to be sent; finishing a send must name exactly this one. */
+	pendingHead?: string;
 	state: "conflict" | "draft" | "committed_not_pushed" | "pull_needed" | "published";
 	branch?: string;
 	ahead?: number;
@@ -87,6 +89,8 @@ export interface DraftPanelAction {
 
 export interface DraftPanelModel {
 	visible: boolean;
+	/** Commit the "finish sending" action must carry. */
+	pendingHead?: string;
 	tone: DraftPanelTone;
 	/** Collapsed pill text. */
 	pill: string;
@@ -146,12 +150,48 @@ function recordOf(input: DraftPanelRecordInput): DraftPanelRecord {
 	};
 }
 
-export function deriveDraftPanel(input: DraftPanelInput): DraftPanelModel {
+/** Which optional recovery actions the host actually implements. */
+export interface DraftPanelCapabilities {
+	finishSend?: boolean;
+	pull?: boolean;
+	abortConflict?: boolean;
+	markConflictResolved?: boolean;
+}
+
+const MISSING_ACTION_REASON = "Tuto akci aplikace zatím nepodporuje.";
+
+/**
+ * An action whose handler the host did not supply is shown as unavailable with
+ * a reason, never as an enabled button that quietly does nothing.
+ */
+function applyCapabilities(
+	actions: DraftPanelAction[],
+	capabilities: DraftPanelCapabilities | undefined,
+): DraftPanelAction[] {
+	if (!capabilities) return actions;
+	const supported: Record<string, boolean | undefined> = {
+		finish_send: capabilities.finishSend,
+		pull: capabilities.pull,
+		abort_conflict: capabilities.abortConflict,
+		mark_conflict_resolved: capabilities.markConflictResolved,
+	};
+	return actions.map((action) =>
+		action.enabled && supported[action.kind] === false
+			? { ...action, enabled: false, disabledReason: MISSING_ACTION_REASON }
+			: action,
+	);
+}
+
+export function deriveDraftPanel(
+	input: DraftPanelInput,
+	capabilities?: DraftPanelCapabilities,
+): DraftPanelModel {
 	const records = input.records.map(recordOf);
 	const count = records.length;
 	const base = {
 		records,
 		revision: input.revision,
+		pendingHead: input.pendingHead,
 		ownerNote: input.draftOwner?.actor
 			? `Rozpracované změny začal: ${input.draftOwner.actor}`
 			: undefined,
@@ -168,7 +208,7 @@ export function deriveDraftPanel(input: DraftPanelInput): DraftPanelModel {
 			headline:
 				input.conflict?.message ??
 				"Data se rozešla se serverem. Změny zůstávají vidět, ale publikovat ani vracet teď nejde.",
-			actions: [
+			actions: applyCapabilities([
 				{
 					kind: "abort_conflict",
 					label: "Zrušit a vrátit rozpracované změny",
@@ -182,7 +222,7 @@ export function deriveDraftPanel(input: DraftPanelInput): DraftPanelModel {
 					enabled: false,
 					disabledReason: "Nejdřív je potřeba vyřešit konflikt.",
 				},
-			],
+			], capabilities),
 		};
 	}
 
@@ -200,7 +240,7 @@ export function deriveDraftPanel(input: DraftPanelInput): DraftPanelModel {
 				count > 0
 					? `Publikace ${count === 1 ? "jedné změny" : `${count} změn`} je uložená, ale nedorazila na server. Zbývá dokončit odeslání.`
 					: "Publikace je uložená, ale nedorazila na server. Zbývá dokončit odeslání.",
-			actions: [
+			actions: applyCapabilities([
 				{ kind: "finish_send", label: "Dokončit odeslání", enabled: true },
 				{
 					kind: "discard_draft",
@@ -209,7 +249,7 @@ export function deriveDraftPanel(input: DraftPanelInput): DraftPanelModel {
 					disabledReason:
 						"Publikace už je uložená. Nejdřív ji dokončete; vracet ji zpět není totéž co zahodit rozpracované změny.",
 				},
-			],
+			], capabilities),
 		};
 	}
 
@@ -228,7 +268,7 @@ export function deriveDraftPanel(input: DraftPanelInput): DraftPanelModel {
 					: `${count} rozpracovaných změn čeká na publikaci.`,
 			wholeDraftNote:
 				"Publikuje se celý rozpracovaný obsah najednou — i změny, které přidal někdo jiný.",
-			actions: [
+			actions: applyCapabilities([
 				{
 					kind: "publish",
 					label: "Publikovat vše",
@@ -236,7 +276,7 @@ export function deriveDraftPanel(input: DraftPanelInput): DraftPanelModel {
 					disabledReason: blocking[0]?.message,
 				},
 				{ kind: "discard_draft", label: "Zahodit vše", enabled: true, destructive: true },
-			],
+			], capabilities),
 		};
 	}
 
@@ -248,7 +288,7 @@ export function deriveDraftPanel(input: DraftPanelInput): DraftPanelModel {
 			pill: "Novější data",
 			count: 0,
 			headline: "Kolega publikoval novější data.",
-			actions: [{ kind: "pull", label: "Stáhnout", enabled: true }],
+			actions: applyCapabilities([{ kind: "pull", label: "Stáhnout", enabled: true }], capabilities),
 		};
 	}
 

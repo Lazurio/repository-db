@@ -29,11 +29,11 @@ These govern everything below. Where an older plan says otherwise, these win.
 1. **One data checkout is one shared draft, and it publishes as a whole.** There
    is no selective publish and no per-author draft. The UI says this plainly, so
    nobody expects to send "just their part".
-2. **A confirmation applies to the version that was shown.** The panel receives a
-   draft revision with the review and hands it back when publishing or
-   discarding. If the draft moved in between, the operation does not run and the
-   panel offers a refreshed view. This is a revision check, not a review history
-   and not an approval workflow.
+2. **A confirmation applies to the version that was shown.** The review carries
+   the draft revision that describes its own records, and the panel hands it
+   back when publishing or discarding. If the draft moved in between, the
+   operation does not run and the panel offers a refreshed view. This is a
+   revision check, not a review history and not an approval workflow.
 3. **Reverting has a simple, predictable scope**: one record (one canonical file)
    or the whole draft. Nothing in between. Where that does not hold, the action
    is not offered and the reason is shown. Unrelated changes are never touched.
@@ -133,14 +133,48 @@ offered an action that then refuses.
 Unchanged in its guarantees (validate → materialize → rebase → one audited commit
 → push), plus the revision check. The whole draft goes out as one commit.
 
+The revision is checked **twice**: when the lock is taken, and again immediately
+before staging. The second check matters because integration happens in between
+and involves the network — a write landing in that window would otherwise be
+staged although nobody reviewed it. Only the content part is compared the second
+time: integration moves the baseline by design, the reviewed content must not
+have moved at all.
+
+### Finishing a send
+
+A publish that commits but fails to push leaves an unsent commit. Finishing that
+send is its own operation, not a publish: `finishSendOnly` with the
+`expectedHead` the review showed. It refuses when any draft change exists,
+because otherwise a failed push becomes a way to publish unreviewed work with
+one click.
+
+### What the confirmation covers
+
+| Writer | Held back during publish/discard | Caught by the revision check |
+| --- | --- | --- |
+| `Collection.put` / `remove` | yes — the shared write gate | yes |
+| the CLI's own writes | yes — the same gate | yes |
+| a host app that takes the gate | yes | yes |
+| any other direct filesystem write | no | yes — publish refuses rather than including it |
+
+The gate is the publish lock itself, not a second mechanism: a supported write
+takes it briefly and waits if a publish or discard holds it. The engine does not
+claim to hold back a process that writes the checkout without passing through
+it; for those, the content check before staging is the guarantee — such a write
+makes the publish stop, it never rides along.
+
 ### CLI parity
 
 ```bash
-repository-db review  [--json]
+repository-db review  [--json]                      # prints the draft revision
 repository-db discard (--record <path> | --draft) [--revision <draft-revision>]
 repository-db origin  --path <p>... --kind app|agent --actor <actor>
-repository-db publish --actor "…" --source "…"
+repository-db publish --actor "…" --source "…" [--revision <draft-revision>]
+repository-db publish --finish-send --head <sha> --actor "…" --source "…"
 ```
+
+A revision supplied to the CLI is a confirmation of a specific draft and is
+enforced; omitting it means "act on the draft as it stands right now".
 
 ## Host API convention
 

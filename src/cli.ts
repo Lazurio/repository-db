@@ -15,7 +15,8 @@ Usage:
   repository-db validate [--mount <path>]
   repository-db sync     [--mount <path>] [--pull] [--json]
   repository-db publish  [--mount <path>] --actor <actor> --source <source>
-                         [--summary <text>] [--entity <id>]... [--json]
+                         [--summary <text>] [--entity <id>]... [--revision <rev>]
+                         [--finish-send --head <sha>] [--json]
   repository-db review   [--mount <path>] [--json] [--inputs]
   repository-db discard  [--mount <path>] (--record <p> | --draft)
                          [--revision <draft-revision>] [--json]
@@ -64,6 +65,7 @@ function parseArgs(argv: string[]): Args {
 			"pull",
 			"draft",
 			"inputs",
+			"finish-send",
 		]);
 		if (boolFlags.has(name)) {
 			flags.set(name, true);
@@ -190,6 +192,7 @@ async function main(argv: string[]): Promise<number> {
 		}
 		case "publish": {
 			const db = RepositoryDb.open(mountPath(args));
+			const finishSend = args.flags.get("finish-send") === true;
 			const result = await db.publish({
 				actor: requireFlag(args, "actor"),
 				source: requireFlag(args, "source"),
@@ -198,6 +201,18 @@ async function main(argv: string[]): Promise<number> {
 						? (args.flags.get("summary") as string)
 						: undefined,
 				entities: args.entities.length > 0 ? args.entities : undefined,
+				// A supplied revision is a confirmation of a specific draft and
+				// must reach the engine; silently dropping it would make the
+				// flag look like a guard while publishing whatever is there now.
+				expectedRevision:
+					typeof args.flags.get("revision") === "string"
+						? (args.flags.get("revision") as string)
+						: undefined,
+				expectedHead:
+					typeof args.flags.get("head") === "string"
+						? (args.flags.get("head") as string)
+						: undefined,
+				finishSendOnly: finishSend || undefined,
 			});
 			emit(args, result, () =>
 				result.state === "nothing_to_publish"
@@ -231,7 +246,8 @@ async function main(argv: string[]): Promise<number> {
 				});
 				return [
 					owner ? `draft started by: ${owner.actor}` : "draft started by: unknown",
-					`draft revision: ${db.draftRevision()}`,
+					// From the snapshot, so it describes exactly these resources.
+					`draft revision: ${snapshot.draftRevision}`,
 					`publish readiness: ${snapshot.publishReadiness.state}`,
 					...lines,
 				].join("\n");

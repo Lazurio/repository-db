@@ -209,16 +209,22 @@ export function discardDraft(
 		const removed: string[] = [];
 
 		if (options.scope.kind === "draft") {
-			// The whole draft is one unit, so it returns as one unit. Git's own
-			// reset+clean is the smallest mechanism that also handles staged
-			// edits, deletions and renames correctly. `clean -fd` leaves ignored
-			// files alone, so the engine layer survives.
+			// The whole draft is one unit, so it returns as one unit. `reset
+			// --hard` handles tracked content, staging and renames correctly.
+			//
+			// Untracked files are then removed *by name*, from the set that was
+			// just confirmed — not with `clean -fd`. A blanket clean would also
+			// delete a file created after the revision check, which is work
+			// nobody confirmed discarding and which no lock can fully prevent
+			// for writers outside the gate.
 			for (const entry of dirtyPaths) {
 				if (existsInHead(mountRoot, entry)) restored.push(entry);
 				else removed.push(entry);
 			}
 			runGitOrThrow(mountRoot, ["reset", "--hard", "HEAD"]);
-			runGitOrThrow(mountRoot, ["clean", "--force", "-d"]);
+			for (const entry of removed) {
+				rmSync(path.join(mountRoot, entry), { force: true });
+			}
 			clearDraftOrigins(mountRoot);
 			clearDraftOwner(mountRoot);
 		} else {

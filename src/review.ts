@@ -6,6 +6,7 @@ import { activeConflict } from "./conflict.ts";
 import { isPathDeclared, undeclaredGeneratedDiffs } from "./generated.ts";
 import { gitBatchShow, gitDirtyPaths, gitHeadCommit, runGit } from "./git.ts";
 import { ENGINE_DIR } from "./lock.ts";
+import { computeDraftRevision } from "./draftRevision.ts";
 import { type DraftOriginRecord, resolveDraftOrigins } from "./origin.ts";
 import { structuralDiff } from "./structuralDiff.ts";
 import {
@@ -457,6 +458,11 @@ export async function computeReviewSnapshot(
 ): Promise<ReviewSurfaceSnapshot> {
 	assertDataRepoBoundary(mountRoot, config);
 
+	// Taken before the changes are collected: if a write lands while the review
+	// is being built, the snapshot carries the older revision and the next
+	// confirmation fails closed. Taking it afterwards would do the opposite —
+	// confirm a draft holding a change that was never shown.
+	const draftRevision = computeDraftRevision(mountRoot);
 	const inputs = collectInputChanges(mountRoot, config);
 	const remaining = new Map(inputs.map((input) => [input.changeId, input]));
 	const resources: ReviewableResource[] = [];
@@ -501,9 +507,12 @@ export async function computeReviewSnapshot(
 	}
 
 	const snapshotLevel = worstLevel(resources.map((resource) => resource.fallback.activeLevel));
+	const head = gitHeadCommit(mountRoot) ?? "";
 	const snapshot: ReviewSurfaceSnapshot = {
 		reviewContractVersion: REVIEW_SURFACE_CONTRACT_VERSION,
-		baselineHead: gitHeadCommit(mountRoot) ?? "",
+		baselineHead: head,
+		draftRevision,
+		head,
 		computedAt: options.computedAt,
 		resources,
 		publishReadiness: publishReadiness(mountRoot, config, resources),

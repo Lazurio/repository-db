@@ -392,6 +392,16 @@ export interface ReviewableResource {
 export interface ReviewSurfaceSnapshot {
 	reviewContractVersion: string;
 	baselineHead: string;
+	/**
+	 * Revision of the draft these resources describe.
+	 *
+	 * Computed as part of the same review, so a confirmation carrying it applies
+	 * to exactly what was shown. Reading it separately after a review would
+	 * reintroduce the gap it exists to close.
+	 */
+	draftRevision?: string;
+	/** HEAD at review time; used to finish sending exactly this commit. */
+	head?: string;
 	computedAt?: string;
 	/** Raw input changes used to compute the resource representation, if retained. */
 	inputChanges?: ReviewInputChange[];
@@ -441,10 +451,22 @@ export interface PublishOptions {
 	actor: string;
 	/**
 	 * Revision of the draft the user confirmed. When present, publish runs only
-	 * if the draft still looks exactly like that; otherwise it refuses and the
-	 * panel refreshes. A headless caller with nothing displayed may omit it.
+	 * if the draft still looks exactly like that — checked when the lock is
+	 * taken and again immediately before staging. A headless caller with
+	 * nothing displayed may omit it.
 	 */
 	expectedRevision?: string;
+	/**
+	 * Commit the caller expects to find. Used when finishing a send: the push
+	 * must carry the exact commit that was shown, not whatever HEAD became.
+	 */
+	expectedHead?: string;
+	/**
+	 * Finish sending an existing commit and nothing more. Refuses when draft
+	 * changes exist, so a failed push cannot become a way to publish unreviewed
+	 * work.
+	 */
+	finishSendOnly?: boolean;
 	/** Producing surface, e.g. `sample-app-v1` or `repository-db-cli`. */
 	source: string;
 	/** Optional human summary used as the first commit-message line. */

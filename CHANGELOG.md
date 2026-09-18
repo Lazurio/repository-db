@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+- Close the confirmation gaps QA found. The draft revision is now two parts
+  (`draft:<baseline>.<content>`) and covers the Git file mode; `publish()`
+  re-checks the content part immediately before staging, so a write landing
+  during integration stops the publish instead of riding along. An empty
+  `expectedRevision` is treated as a malformed confirmation, not an absent one,
+  and `review()` returns the revision describing its own resources.
+
+- Add the shared write gate: `Collection.put`/`remove` take the publish lock
+  briefly, so a supported write cannot land inside a publish or a discard. The
+  engine does not claim to hold back writers outside the gate; for those the
+  content check is the backstop.
+
+- Finishing a send is its own operation: `finishSendOnly` with `expectedHead`
+  pushes exactly the commit that was shown and refuses when any draft change
+  exists, so a failed push cannot become a one-click unreviewed publish.
+
+- Whole-draft discard removes untracked files by name from the confirmed set
+  instead of running `git clean -fd`, so work created after the confirmation is
+  never deleted.
+
+- The CLI honours `--revision` on publish and prints the review's own revision.
+  The shared card disables recovery actions the host has not wired instead of
+  rendering buttons that silently do nothing.
+
 - Read every record's published version with one `git cat-file --batch` process
   instead of one `git show` per record. A 150-record draft reviews in ~0.3 s
   instead of ~1.4 s, and the cost no longer grows with the number of changes.

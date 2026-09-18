@@ -5,6 +5,7 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { assertNoActiveConflict } from "./conflict.ts";
+import { withDraftWriteLock } from "./lock.ts";
 import { readYamlFile, writeYamlFileAtomic } from "./yamlIo.ts";
 import {
 	type DocumentParser,
@@ -113,16 +114,22 @@ export class Collection<T> {
 			id,
 			record: parsed,
 		};
-		writeYamlFileAtomic(path.join(this.directory, documentFileName(id)), envelope);
+		// Through the shared gate: a write must not land inside a publish or a
+		// discard, or the user would confirm one draft and get another.
+		withDraftWriteLock(this.mountRoot, () => {
+			writeYamlFileAtomic(path.join(this.directory, documentFileName(id)), envelope);
+		});
 	}
 
 	/** Delete a document as a local draft change. */
 	remove(id: string): boolean {
 		assertNoActiveConflict(this.mountRoot);
 		const filePath = path.join(this.directory, documentFileName(id));
-		if (!existsSync(filePath)) return false;
-		rmSync(filePath);
-		return true;
+		return withDraftWriteLock(this.mountRoot, () => {
+			if (!existsSync(filePath)) return false;
+			rmSync(filePath);
+			return true;
+		});
 	}
 
 	private parseEnvelope(raw: unknown, id: string): CollectionDocument<T> {

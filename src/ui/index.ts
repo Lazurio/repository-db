@@ -1,6 +1,7 @@
 export {
 	deriveDraftPanel,
 	type DraftPanelAction,
+	type DraftPanelCapabilities,
 	type DraftPanelConflict,
 	type DraftPanelFieldRow,
 	type DraftPanelInput,
