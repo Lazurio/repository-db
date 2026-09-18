@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+- Finishing a send requires the commit it finishes: `finishSendOnly` without a
+  non-empty `expectedHead`, and `--finish-send` without `--head`, are refused
+  before any fetch, lock or push. The card cannot offer the action until the
+  review has supplied the pending commit.
+- The lock now releases only its own acquisition (a random token), so a
+  reclaimed lock's former holder can no longer remove its successor's lock and
+  silently open the write gate.
+- Collection writes re-check the conflict state under the gate.
+- Revision hashing is length-framed and treats a dangling symlink as a link,
+  not a deletion. Review never follows a symlink out of the data checkout into
+  the payload. Rename detection no longer depends on `status.renames`; paths
+  are read NUL-delimited; a path with a newline falls back to per-blob reads;
+  layout paths ignore a trailing slash; the document root is the empty JSON
+  Pointer.
+- The card ignores out-of-order review responses, clears a stale review when a
+  refresh fails, and never offers a per-record revert where the engine refuses
+  discards as a whole.
+- The standard now states the contract precisely: the shared gate is the
+  guarantee for supported writers; the pre-staging comparison is best-effort
+  for anything that writes the checkout directly.
+
 - The pre-staging check now compares canonical draft content captured after
   publish's own repair steps, instead of the revision's content part: a declared
   materializer rewriting generated output was making a correctly confirmed

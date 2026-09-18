@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
 	type DraftPanelInput,
 	type DraftPanelModel,
@@ -154,12 +154,24 @@ export function DraftPublishPanel({
 	const [available, setAvailable] = useState(true);
 	const [sessionExpired, setSessionExpired] = useState(false);
 
+	// Refreshes overlap (poll, draft events, after an action). Only the newest
+	// request may update the card; a slower older answer would otherwise put a
+	// superseded draft and its revision back on screen.
+	const latestRequest = useRef(0);
+
 	const refresh = useCallback(async () => {
+		const request = ++latestRequest.current;
 		try {
-			setInput(await api.loadReview());
+			const next = await api.loadReview();
+			if (request !== latestRequest.current) return;
+			setInput(next);
 			setAvailable(true);
 			setSessionExpired(false);
 		} catch (error) {
+			if (request !== latestRequest.current) return;
+			// Whatever the reason, the last review is no longer trustworthy, so
+			// its records and actions must not stay on screen.
+			setInput(null);
 			// An expired session is a blocked state the user can act on, so it is
 			// shown. Anything else — typically no mounted data checkout — stays
 			// silent rather than shouting an error at someone who cannot fix it.

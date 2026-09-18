@@ -61,6 +61,15 @@ function parseGeneratedManifest(value: unknown): GeneratedManifestEntry[] {
 	});
 }
 
+/**
+ * `generated/` and `generated` must mean the same directory: every prefix check
+ * builds `<layout>/`, and a trailing slash would turn it into `generated//`,
+ * which matches nothing.
+ */
+function normalizeLayoutPath(value: string): string {
+	return value.replace(/\/+$/, "");
+}
+
 export function parseRepositoryDbConfig(raw: unknown): RepositoryDbConfig {
 	const root = expectRecord(raw, "<root>");
 	const schemaVersion = expectString(root.schema_version, "schema_version");
@@ -109,10 +118,14 @@ export function parseRepositoryDbConfig(raw: unknown): RepositoryDbConfig {
 			version: expectString(schema.version, "schema.version"),
 		},
 		layout: {
-			data: typeof layoutRaw.data === "string" ? layoutRaw.data : "data",
+			data: normalizeLayoutPath(typeof layoutRaw.data === "string" ? layoutRaw.data : "data"),
 			generated:
-				typeof layoutRaw.generated === "string" ? layoutRaw.generated : "generated",
-			scripts: typeof layoutRaw.scripts === "string" ? layoutRaw.scripts : "scripts",
+				normalizeLayoutPath(
+					typeof layoutRaw.generated === "string" ? layoutRaw.generated : "generated",
+				),
+			scripts: normalizeLayoutPath(
+				typeof layoutRaw.scripts === "string" ? layoutRaw.scripts : "scripts",
+			),
 		},
 		generatedManifest: parseGeneratedManifest(root.generated_manifest),
 		validate: validateRaw as string[],

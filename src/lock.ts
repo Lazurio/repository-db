@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { PublishLockedError, RepositoryDbError } from "./types.ts";
@@ -13,6 +14,12 @@ interface LockPayload {
 	pid: number;
 	hostname: string;
 	acquiredAt: string;
+	/**
+	 * Identity of this acquisition. pid + hostname are not enough once the lock
+	 * doubles as the write gate: a stale-reclaimed lock and its successor can
+	 * share both, and releasing by pid would remove the successor's lock.
+	 */
+	token?: string;
 }
 
 function lockPath(mountRoot: string): string {
@@ -64,6 +71,7 @@ export function acquirePublishLock(mountRoot: string): () => void {
 		pid: process.pid,
 		hostname: os.hostname(),
 		acquiredAt: new Date().toISOString(),
+		token: randomUUID(),
 	};
 	// "wx" fails when someone else recreated the lock between check and write.
 	try {
@@ -79,7 +87,7 @@ export function acquirePublishLock(mountRoot: string): () => void {
 
 	return () => {
 		const current = readLock(filePath);
-		if (current && current.pid === payload.pid && current.hostname === payload.hostname) {
+		if (current?.token === payload.token) {
 			rmSync(filePath, { force: true });
 		}
 	};

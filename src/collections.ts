@@ -117,6 +117,9 @@ export class Collection<T> {
 		// Through the shared gate: a write must not land inside a publish or a
 		// discard, or the user would confirm one draft and get another.
 		withDraftWriteLock(this.mountRoot, () => {
+			// Re-checked under the gate: a publish can record a conflict and
+			// release the lock between the check above and this write.
+			assertNoActiveConflict(this.mountRoot);
 			writeYamlFileAtomic(path.join(this.directory, documentFileName(id)), envelope);
 		});
 	}
@@ -126,6 +129,7 @@ export class Collection<T> {
 		assertNoActiveConflict(this.mountRoot);
 		const filePath = path.join(this.directory, documentFileName(id));
 		return withDraftWriteLock(this.mountRoot, () => {
+			assertNoActiveConflict(this.mountRoot);
 			if (!existsSync(filePath)) return false;
 			rmSync(filePath);
 			return true;

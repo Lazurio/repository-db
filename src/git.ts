@@ -218,6 +218,8 @@ export function gitRenameSources(repoRoot: string): Map<string, string> {
 		"status",
 		"--porcelain=v1",
 		"-z",
+		// Explicit, so the guard does not depend on the user's status.renames.
+		"--renames",
 		"--untracked-files=all",
 	]);
 	const tokens = output.split("\0").filter((token) => token.length > 0);
@@ -313,6 +315,17 @@ export function gitBatchShow(
 ): Map<string, string | undefined> {
 	const result = new Map<string, string | undefined>();
 	if (relativePaths.length === 0) return result;
+
+	// The batch protocol is newline-delimited. A path containing a newline would
+	// shift every following answer onto the wrong path, so such a set is read
+	// one blob at a time instead — rare, and correct beats fast.
+	if (relativePaths.some((entry) => entry.includes("\n"))) {
+		for (const relativePath of relativePaths) {
+			const single = runGit(repoRoot, ["show", `${ref}:${relativePath}`]);
+			result.set(relativePath, single.status === 0 ? single.stdout : undefined);
+		}
+		return result;
+	}
 
 	const request = spawnSync("git", ["-C", repoRoot, "cat-file", "--batch"], {
 		input: `${relativePaths.map((entry) => `${ref}:${entry}`).join("\n")}\n`,

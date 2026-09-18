@@ -209,6 +209,16 @@ export async function publish(
 	if (!options.source?.trim()) {
 		throw new RepositoryDbError("invalid_publish", "publish requires a source");
 	}
+	// Finishing a send pushes an existing commit, so it has to name which one.
+	// Without that there is nothing to hold it to: a commit added after the
+	// review would be pushed as if it had been shown. Refused before any fetch,
+	// lock or push.
+	if (options.finishSendOnly && !options.expectedHead?.trim()) {
+		throw new RepositoryDbError(
+			"invalid_publish",
+			"finishing a send requires the commit that was shown (expectedHead)",
+		);
+	}
 
 	assertDataRepoBoundary(mountRoot, config);
 	assertNoActiveConflict(mountRoot);

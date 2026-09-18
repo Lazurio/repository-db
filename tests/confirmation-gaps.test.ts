@@ -315,7 +315,12 @@ describe("the panel does not offer what the host cannot do", () => {
 	test("an unwired recovery action is disabled with a reason", async () => {
 		const { deriveDraftPanel } = await import("../src/ui/draftPanelModel.ts");
 		const model = deriveDraftPanel(
-			{ revision: "draft:a.b", state: "committed_not_pushed", records: [] },
+			{
+				revision: "draft:a.b",
+				state: "committed_not_pushed",
+				pendingHead: "c".repeat(40),
+				records: [],
+			},
 			{ finishSend: false },
 		);
 		const finish = model.actions.find((action) => action.kind === "finish_send");
@@ -381,6 +386,207 @@ describe("publishing a draft that regenerates output", () => {
 			expect(
 				readFileSync(path.join(fixture.mountPath, "generated/rollup.yaml"), "utf8"),
 			).toContain("count:");
+		} finally {
+			rmSync(fixture.root, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("round 2 — finishing a send must name its commit", () => {
+	test("finishSendOnly without expectedHead is refused before anything moves", async () => {
+		const fixture = createFixtureRepo();
+		try {
+			const db = RepositoryDb.open(fixture.mountPath);
+			writeFixtureDocument(fixture.mountPath, "reviewed", { name: "Reviewed" });
+			publishBaseline(fixture);
+			writeFixtureDocument(fixture.mountPath, "reviewed", { name: "Unsent" });
+			git(fixture.mountPath, ["add", "--all"]);
+			git(fixture.mountPath, ["commit", "--message", "publish that failed to push"]);
+			const remoteBefore = git(fixture.originPath, ["rev-parse", fixture.branch]).trim();
+
+			for (const expectedHead of [undefined, "", "   "]) {
+				await expect(
+					db.publish({
+						actor: ACTOR,
+						source: "test",
+						finishSendOnly: true,
+						expectedHead,
+						skipValidate: true,
+					}),
+				).rejects.toThrow(/requires the commit that was shown/);
+			}
+			// Nothing reached the remote.
+			expect(git(fixture.originPath, ["rev-parse", fixture.branch]).trim()).toBe(remoteBefore);
+			expect(db.status().state).toBe("committed_not_pushed");
+		} finally {
+			rmSync(fixture.root, { recursive: true, force: true });
+		}
+	});
+
+	test("the panel cannot offer finishing a send without the pending commit", async () => {
+		const { deriveDraftPanel } = await import("../src/ui/draftPanelModel.ts");
+		const model = deriveDraftPanel({
+			revision: "draft:a.b",
+			state: "committed_not_pushed",
+			records: [],
+		});
+		const finish = model.actions.find((action) => action.kind === "finish_send");
+		expect(finish?.enabled).toBe(false);
+		expect(finish?.disabledReason).toContain("Obnovte přehled");
+	});
+});
+
+describe("round 2 — no row offers a revert the engine would refuse", () => {
+	test("conflict and unsent states disable per-record revert whatever the host said", async () => {
+		const { deriveDraftPanel } = await import("../src/ui/draftPanelModel.ts");
+		const record = {
+			resource: {
+				appId: "a",
+				resourceType: "r",
+				stableResourceId: "r:1",
+				label: "Record",
+				changes: [
+					{
+						changeId: "c",
+						kind: "modified" as const,
+						summary: "",
+						technicalRefs: [{ path: "data/r/1.yaml", kind: "canonical_data_path" as const }],
+						fields: [],
+					},
+				],
+				reviewState: { value: "unreviewed" as const },
+				fallback: { activeLevel: "resource_adapter" as const, steps: [] },
+			},
+			technicalPath: "data/r/1.yaml",
+			revert: { supported: true },
+		};
+		for (const input of [
+			{ state: "conflict" as const },
+			{ state: "committed_not_pushed" as const, pendingHead: "c".repeat(40) },
+			{ state: "draft" as const, ahead: 1 },
+		]) {
+			const model = deriveDraftPanel({ revision: "draft:a.b", records: [record], ...input });
+			expect(model.records[0]?.revertSupported).toBe(false);
+			expect(model.records[0]?.revertBlockedReason).toBeTruthy();
+		}
+	});
+});
+
+describe("round 2 — revision and review read the checkout honestly", () => {
+	test("retargeting a dangling symlink changes the revision", async () => {
+		const { symlinkSync, unlinkSync } = await import("node:fs");
+		const fixture = createFixtureRepo();
+		try {
+			const linkPath = path.join(fixture.mountPath, "data/things/link.yaml");
+			symlinkSync("does-not-exist-a.yaml", linkPath);
+			const before = computeDraftRevision(fixture.mountPath);
+			unlinkSync(linkPath);
+			symlinkSync("does-not-exist-b.yaml", linkPath);
+			expect(computeDraftRevision(fixture.mountPath)).not.toBe(before);
+		} finally {
+			rmSync(fixture.root, { recursive: true, force: true });
+		}
+	});
+
+	test("a dirty symlink is reviewed as its target path, never followed", async () => {
+		const { symlinkSync } = await import("node:fs");
+		const fixture = createFixtureRepo();
+		try {
+			const secretPath = path.join(fixture.root, "host-secret.yaml");
+			writeFileSync(secretPath, "token: TOP-SECRET-VALUE\n", "utf8");
+			symlinkSync(secretPath, path.join(fixture.mountPath, "data/things/link.yaml"));
+
+			const snapshot = await RepositoryDb.open(fixture.mountPath).review();
+			expect(JSON.stringify(snapshot)).not.toContain("TOP-SECRET-VALUE");
+		} finally {
+			rmSync(fixture.root, { recursive: true, force: true });
+		}
+	});
+
+	test("rename detection does not depend on the user's git config", () => {
+		const fixture = createFixtureRepo();
+		try {
+			const db = RepositoryDb.open(fixture.mountPath);
+			writeFixtureDocument(fixture.mountPath, "old", { name: "Old" });
+			publishBaseline(fixture);
+			git(fixture.mountPath, ["config", "status.renames", "false"]);
+			git(fixture.mountPath, ["mv", "data/things/old.yaml", "data/things/new.yaml"]);
+
+			expect(db.canRevertRecord("data/things/new.yaml").reason).toContain("renamed");
+		} finally {
+			rmSync(fixture.root, { recursive: true, force: true });
+		}
+	});
+
+	test("a trailing slash in the layout does not hide generated changes", async () => {
+		const { parseRepositoryDbConfig } = await import("../src/config.ts");
+		const config = parseRepositoryDbConfig({
+			schema_version: "repository-db.config.v1",
+			app: "fixture",
+			data_repo: { remote: "git@example.com:x.git", branch: "v3" },
+			schema: { name: "x", version: "1" },
+			layout: { data: "data/", generated: "generated/", scripts: "scripts/" },
+		});
+		expect(config.layout).toEqual({ data: "data", generated: "generated", scripts: "scripts" });
+	});
+});
+
+describe("round 2 — the gate's release belongs to its acquisition", () => {
+	test("releasing a reclaimed lock does not remove its successor", () => {
+		const fixture = createFixtureRepo();
+		try {
+			const lockFile = path.join(fixture.mountPath, ".repository-db", "publish.lock");
+			const releaseFirst = acquirePublishLock(fixture.mountPath);
+			// Simulate the stale reclaim: the file is replaced by a new holder in
+			// this same process (same pid and hostname, different acquisition).
+			rmSync(lockFile);
+			const releaseSecond = acquirePublishLock(fixture.mountPath);
+
+			releaseFirst();
+			// The successor's lock is still there and still holds the gate.
+			expect(existsSync(lockFile)).toBe(true);
+			expect(() => withDraftWriteLock(fixture.mountPath, () => undefined)).toThrow(
+				/publish or discard is in progress/,
+			);
+			releaseSecond();
+			expect(existsSync(lockFile)).toBe(false);
+		} finally {
+			rmSync(fixture.root, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("round 2 — the CLI demands the head too", () => {
+	test("--finish-send without --head is refused and pushes nothing", async () => {
+		const { spawnSync } = await import("node:child_process");
+		const fixture = createFixtureRepo();
+		try {
+			writeFixtureDocument(fixture.mountPath, "reviewed", { name: "Reviewed" });
+			publishBaseline(fixture);
+			writeFixtureDocument(fixture.mountPath, "reviewed", { name: "Unsent" });
+			git(fixture.mountPath, ["add", "--all"]);
+			git(fixture.mountPath, ["commit", "--message", "publish that failed to push"]);
+			const remoteBefore = git(fixture.originPath, ["rev-parse", fixture.branch]).trim();
+
+			const run = spawnSync(
+				process.execPath,
+				[
+					path.join(import.meta.dir, "../src/cli.ts"),
+					"publish",
+					"--mount",
+					fixture.mountPath,
+					"--actor",
+					ACTOR,
+					"--source",
+					"test",
+					"--finish-send",
+				],
+				{ encoding: "utf8" },
+			);
+
+			expect(run.status).not.toBe(0);
+			expect(run.stderr).toContain("--finish-send requires --head");
+			expect(git(fixture.originPath, ["rev-parse", fixture.branch]).trim()).toBe(remoteBefore);
 		} finally {
 			rmSync(fixture.root, { recursive: true, force: true });
 		}

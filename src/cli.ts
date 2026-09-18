@@ -193,6 +193,12 @@ async function main(argv: string[]): Promise<number> {
 		case "publish": {
 			const db = RepositoryDb.open(mountPath(args));
 			const finishSend = args.flags.get("finish-send") === true;
+			if (finishSend && typeof args.flags.get("head") !== "string") {
+				throw new RepositoryDbError(
+					"invalid_args",
+					"--finish-send requires --head <sha> (the commit waiting to be sent, as printed by review)",
+				);
+			}
 			const result = await db.publish({
 				actor: requireFlag(args, "actor"),
 				source: requireFlag(args, "source"),

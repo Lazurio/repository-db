@@ -153,20 +153,34 @@ one click.
 
 ### What the confirmation covers
 
-| Writer | Held back during publish/discard | Caught by the revision check |
-| --- | --- | --- |
-| `Collection.put` / `remove` | yes — the shared write gate | yes |
-| the CLI's own writes | yes — the same gate | yes |
-| a host app that takes the gate | yes | yes |
-| any other direct filesystem write | no | yes — publish refuses rather than including it |
+The guarantee is **the shared gate**, and it holds for writers that pass through
+it. Everything else is detected on a best-effort basis, not guaranteed.
 
-The gate is the publish lock itself, not a second mechanism: a supported write
-takes it briefly, and fails immediately if a publish or discard holds it rather
-than waiting — a host runs publish on the same thread, so waiting would stall
-the very operation the write is waiting for. The engine does not
-claim to hold back a process that writes the checkout without passing through
-it; for those, the content check before staging is the guarantee — such a write
-makes the publish stop, it never rides along.
+| Writer | Held back for the whole publish / discard / integration |
+| --- | --- |
+| `Collection.put` / `remove` | yes — the shared gate |
+| the CLI's own writes | yes — the same gate |
+| a host app's publish, finish-send and pull paths | yes, when the host holds the gate for its whole critical section (Deals does) |
+| any other direct filesystem write | **no** |
+
+The gate is the publish lock itself, not a second mechanism. A supported write
+takes it briefly and fails immediately if a publish, discard or integration
+holds it, rather than waiting — a host runs publish on the same thread, so
+waiting would stall the very operation the write is waiting for.
+
+For writes **outside** the gate the engine promises less, and says so:
+
+- publish compares the canonical draft content once more just before staging,
+  so such a write landing earlier in the publish usually makes it stop;
+- but a write landing between that comparison and the staging itself can still
+  be included, and a write to a **generated** path is not covered by the
+  comparison at all, because materializing rewrites generated output by design.
+
+A one-shot content comparison cannot turn an ungated writer into a safe one. A
+process that writes the data checkout directly — a script, an editor, an agent
+not using the CLI — is responsible for not doing so while a publish runs. The
+supported way for an agent to write is the CLI or the collection API, which
+pass through the gate.
 
 ### CLI parity
 
@@ -177,6 +191,9 @@ repository-db origin  --path <p>... --kind app|agent --actor <actor>
 repository-db publish --actor "…" --source "…" [--revision <draft-revision>]
 repository-db publish --finish-send --head <sha> --actor "…" --source "…"
 ```
+
+Finishing a send always names the commit it finishes: `--finish-send` without
+`--head` is refused before anything is fetched, locked or pushed.
 
 A revision supplied to the CLI is a confirmation of a specific draft and is
 enforced; omitting it means "act on the draft as it stands right now".

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { lstatSync, readFileSync, readlinkSync } from "node:fs";
 import path from "node:path";
 import { assertDataRepoBoundary } from "./boundary.ts";
 import { activeConflict } from "./conflict.ts";
@@ -106,7 +106,22 @@ function baselineContent(
 
 function workingContent(mountRoot: string, relativePath: string): string | undefined {
 	const absolute = path.join(mountRoot, relativePath);
-	if (!existsSync(absolute)) return undefined;
+	let stats: ReturnType<typeof lstatSync>;
+	try {
+		stats = lstatSync(absolute);
+	} catch {
+		return undefined;
+	}
+	// A symlink is reviewed as what Git stores — its target path — and never
+	// followed. Following it would let a dirty link in the data checkout pull
+	// an arbitrary host file into the review payload served to the browser.
+	if (stats.isSymbolicLink()) {
+		try {
+			return readlinkSync(absolute);
+		} catch {
+			return undefined;
+		}
+	}
 	try {
 		return readFileSync(absolute, "utf8");
 	} catch {
@@ -248,8 +263,8 @@ export function collectInputChanges(
 	const committedPaths =
 		baselineRef === "HEAD"
 			? []
-			: runGit(mountRoot, ["diff", "--name-only", baselineRef, "HEAD"])
-					.stdout.split("\n")
+			: runGit(mountRoot, ["diff", "--name-only", "-z", baselineRef, "HEAD"])
+					.stdout.split("\0")
 					.filter(Boolean)
 					.filter((entry) => !entry.startsWith(`${ENGINE_DIR}/`));
 

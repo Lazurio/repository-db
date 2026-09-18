@@ -186,7 +186,25 @@ export function deriveDraftPanel(
 	input: DraftPanelInput,
 	capabilities?: DraftPanelCapabilities,
 ): DraftPanelModel {
-	const records = input.records.map(recordOf);
+	// A record revert is a discard; where the engine refuses discards as a whole
+	// (conflict, a commit waiting to be sent), no row may offer one — whatever
+	// the host reported per record.
+	const discardBlocked =
+		input.state === "conflict" || input.state === "committed_not_pushed" || (input.ahead ?? 0) > 0;
+	const records = input.records
+		.map(recordOf)
+		.map((record) =>
+			discardBlocked && record.revertSupported
+				? {
+						...record,
+						revertSupported: false,
+						revertBlockedReason:
+							input.state === "conflict"
+								? "Během konfliktu nejde nic vracet."
+								: "Nejdřív dokončete odeslání uložené publikace.",
+					}
+				: record,
+		);
 	const count = records.length;
 	const base = {
 		records,
@@ -241,7 +259,15 @@ export function deriveDraftPanel(
 					? `Publikace ${count === 1 ? "jedné změny" : `${count} změn`} je uložená, ale nedorazila na server. Zbývá dokončit odeslání.`
 					: "Publikace je uložená, ale nedorazila na server. Zbývá dokončit odeslání.",
 			actions: applyCapabilities([
-				{ kind: "finish_send", label: "Dokončit odeslání", enabled: true },
+				{
+					kind: "finish_send",
+					label: "Dokončit odeslání",
+					// Without the pending commit there is nothing to hold the send to.
+					enabled: Boolean(input.pendingHead),
+					disabledReason: input.pendingHead
+						? undefined
+						: "Chybí informace o čekající publikaci. Obnovte přehled.",
+				},
 				{
 					kind: "discard_draft",
 					label: "Zahodit vše",

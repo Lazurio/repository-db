@@ -168,7 +168,9 @@ export function structuralDiff(
 			return;
 		}
 
-		push(pointer === "" ? "/" : pointer, label, beforeValue, afterValue);
+		// The document root is the empty JSON Pointer, not "/" — which would
+		// name a member whose key is the empty string.
+		push(pointer, label, beforeValue, afterValue);
 	};
 
 	walk(before, after, "", "dokument", 0);

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, readFileSync, readlinkSync } from "node:fs";
+import { lstatSync, readFileSync, readlinkSync } from "node:fs";
 import path from "node:path";
 import { gitDirtyPaths, gitHeadCommit } from "./git.ts";
 import { ENGINE_DIR } from "./lock.ts";
@@ -53,18 +53,28 @@ function contentHash(mountRoot: string, dirtyPaths: readonly string[]): string {
 		hash.update("\0");
 		hash.update(fileMode(absolute));
 		hash.update("\0");
-		if (!existsSync(absolute)) {
+		let stats: ReturnType<typeof lstatSync> | undefined;
+		try {
+			// lstat, not exists: a dangling symlink is a directory entry with a
+			// target that can change, not a deletion.
+			stats = lstatSync(absolute);
+		} catch {
 			// Dirty but absent is a deletion, a state the revision must
 			// distinguish from the file being present.
 			hash.update("deleted");
 			continue;
 		}
+		let content: Buffer | string;
 		try {
-			const stats = lstatSync(absolute);
-			hash.update(stats.isSymbolicLink() ? readlinkSync(absolute) : readFileSync(absolute));
+			content = stats.isSymbolicLink() ? readlinkSync(absolute) : readFileSync(absolute);
 		} catch {
 			hash.update("unreadable");
+			continue;
 		}
+		// Length-framed, so two different sets of files cannot concatenate into
+		// the same byte stream and share a revision.
+		hash.update(`${Buffer.byteLength(content)}\0`);
+		hash.update(content);
 	}
 	return hash.digest("hex");
 }
