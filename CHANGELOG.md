@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Add `docs/draft-publish-standard.md`, the normative Draft & Publish
+  standard for every repository-db-backed v3 application: the shared
+  floating card, business-language review of draft changes, per-resource
+  origin hints, the discard ladder, the host API convention and agent
+  obligations. The existing card and review-surface documents stay as its
+  detailed type references.
+
 - Move the public repository to `Lazurio/repository-db` and rename the package
   to `@lazurio/repository-db`; generated data-repo READMEs now point to the new
   canonical owner as well.
