@@ -2,6 +2,7 @@
 import path from "node:path";
 import { initDataRepo } from "./init.ts";
 import { RepositoryDb } from "./repositoryDb.ts";
+import type { DraftOriginKind } from "./origin.ts";
 import { RepositoryDbError } from "./types.ts";
 
 const HELP = `repository-db — Git-backed YAML data layer
@@ -15,6 +16,11 @@ Usage:
   repository-db sync     [--mount <path>] [--pull] [--json]
   repository-db publish  [--mount <path>] --actor <actor> --source <source>
                          [--summary <text>] [--entity <id>]... [--json]
+  repository-db review   [--mount <path>] [--json] [--inputs]
+  repository-db discard  [--mount <path>] (--path <p>... | --all) [--actor <actor>]
+                         [--confirm-foreign] [--json]
+  repository-db origin   [--mount <path>] --path <p>... --kind app|agent|external
+                         --actor <actor> [--source <source>] [--json]
   repository-db conflict [--mount <path>] [--abort | --resolved] [--json]
 
 Notes:
@@ -23,18 +29,23 @@ Notes:
   before touching anything; commands refuse to run from a parent code repo.
   Publish = validate -> materialize generated -> rebase fetched origin/<branch>
   with autostash -> one commit with Repository-Db-* trailers -> push.
+  Review reports the current draft as reviewable resources; discard returns
+  draft work to the last published state. An agent stamps its own writes with
+  "origin --kind agent" so a reviewer can tell them apart from app writes.
 `;
 
 interface Args {
 	command: string;
 	flags: Map<string, string | boolean>;
 	entities: string[];
+	paths: string[];
 }
 
 function parseArgs(argv: string[]): Args {
 	const [command = "help", ...rest] = argv;
 	const flags = new Map<string, string | boolean>();
 	const entities: string[] = [];
+	const paths: string[] = [];
 	for (let i = 0; i < rest.length; i += 1) {
 		const arg = rest[i] ?? "";
 		if (!arg.startsWith("--")) {
@@ -48,6 +59,9 @@ function parseArgs(argv: string[]): Args {
 			"resolved",
 			"create-remote",
 			"pull",
+			"all",
+			"confirm-foreign",
+			"inputs",
 		]);
 		if (boolFlags.has(name)) {
 			flags.set(name, true);
@@ -58,10 +72,11 @@ function parseArgs(argv: string[]): Args {
 			throw new RepositoryDbError("invalid_args", `flag --${name} expects a value`);
 		}
 		if (name === "entity") entities.push(value);
+		else if (name === "path") paths.push(value);
 		else flags.set(name, value);
 		i += 1;
 	}
-	return { command, flags, entities };
+	return { command, flags, entities, paths };
 }
 
 function requireFlag(args: Args, name: string): string {
@@ -186,6 +201,99 @@ async function main(argv: string[]): Promise<number> {
 				result.state === "nothing_to_publish"
 					? "nothing to publish (working tree clean)"
 					: `published ${result.commit} (change ${result.changeId}) -> ${result.pushedTo}`,
+			);
+			return 0;
+		}
+		case "review": {
+			const db = RepositoryDb.open(mountPath(args));
+			const snapshot = await db.review({
+				includeInputChanges: args.flags.get("inputs") === true,
+			});
+			emit(args, snapshot, () => {
+				if (snapshot.resources.length === 0) return "no draft changes to review";
+				const owner = db.draftOwner();
+				const lines = snapshot.resources.map((resource) => {
+					const change = resource.changes[0];
+					const origin = change?.origin?.kind ?? "external";
+					const fields = (change?.fields ?? [])
+						.slice(0, 4)
+						.map(
+							(field) =>
+								`      ${field.label}: ${field.beforeSummary ?? "—"} -> ${field.afterSummary ?? "—"}`,
+						);
+					return [
+						`  - [${origin}] ${change?.kind ?? "unknown"} ${resource.label}`,
+						`      ${resource.stableResourceId} (${resource.fallback.activeLevel})`,
+						...fields,
+					].join("\n");
+				});
+				return [
+					owner ? `draft owner: ${owner.actor} (${owner.kind})` : "draft owner: unknown",
+					`publish readiness: ${snapshot.publishReadiness.state}`,
+					...lines,
+				].join("\n");
+			});
+			return 0;
+		}
+		case "discard": {
+			const db = RepositoryDb.open(mountPath(args));
+			const all = args.flags.get("all") === true;
+			if (!all && args.paths.length === 0) {
+				throw new RepositoryDbError(
+					"invalid_args",
+					"discard requires --path <p> (repeatable) or --all",
+				);
+			}
+			const result = db.discard({
+				all,
+				paths: args.paths,
+				actor:
+					typeof args.flags.get("actor") === "string"
+						? (args.flags.get("actor") as string)
+						: undefined,
+				confirmForeign: args.flags.get("confirm-foreign") === true,
+			});
+			emit(args, result, () =>
+				result.discarded.length === 0
+					? "nothing to discard (no matching draft changes)"
+					: [
+							`discarded ${result.discarded.length} path(s):`,
+							...result.discarded.map((entry) => `  - ${entry.action} ${entry.path}`),
+							result.generatedIncluded.length > 0
+								? `generated artifacts included: ${result.generatedIncluded.join(", ")}`
+								: "",
+							`remaining draft paths: ${result.remainingDirtyPaths.length}`,
+						]
+							.filter(Boolean)
+							.join("\n"),
+			);
+			return 0;
+		}
+		case "origin": {
+			const db = RepositoryDb.open(mountPath(args));
+			if (args.paths.length === 0) {
+				throw new RepositoryDbError(
+					"invalid_args",
+					"origin requires at least one --path <p>",
+				);
+			}
+			const kind = requireFlag(args, "kind");
+			if (kind !== "app" && kind !== "agent" && kind !== "external") {
+				throw new RepositoryDbError(
+					"invalid_args",
+					`--kind must be app, agent or external (got ${kind})`,
+				);
+			}
+			db.recordOrigin(args.paths, {
+				kind: kind as DraftOriginKind,
+				actor: requireFlag(args, "actor"),
+				source:
+					typeof args.flags.get("source") === "string"
+						? (args.flags.get("source") as string)
+						: "repository-db-cli",
+			});
+			emit(args, { recorded: args.paths, kind }, () =>
+				`recorded ${kind} origin for ${args.paths.length} path(s)`,
 			);
 			return 0;
 		}

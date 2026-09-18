@@ -188,6 +188,26 @@ export interface ReviewFieldSummary {
 	uiAnchor?: ReviewUiAnchor;
 }
 
+/**
+ * Best-effort provenance of a draft change: written through an app API by an
+ * identified person, written by a task agent, or written outside the
+ * application (plain filesystem/Git edit, or no recorded hint at all).
+ *
+ * Advisory only. It is never an authorization input and never the audit
+ * record — that remains the publish commit and its trailers.
+ */
+export type ReviewChangeOriginKind = "app" | "agent" | "external";
+
+export interface ReviewChangeOrigin {
+	kind: ReviewChangeOriginKind;
+	/** Identity of the writer, in the same format as the publish actor. */
+	actor?: string;
+	/** Producing surface, e.g. `deals-v3` or `repository-db-cli`. */
+	source?: string;
+	/** ISO timestamp when the hint was recorded. */
+	recordedAt?: string;
+}
+
 export interface ResourceChange {
 	/** Stable within one draft/review computation; shared by panels, rows and publish readiness. */
 	changeId: string;
@@ -202,6 +222,8 @@ export interface ResourceChange {
 	draftContentHash?: string;
 	/** Source technical refs for generated outputs, when known. */
 	generatedFrom?: ReviewTechnicalReference[];
+	/** Advisory provenance hint for the reviewer; never an authorization input. */
+	origin?: ReviewChangeOrigin;
 }
 
 export type ReviewInputChangeKind = ResourceChangeKind | "renamed";
@@ -222,6 +244,8 @@ export interface ReviewInputChange {
 	baselineContentHash?: string;
 	/** Source technical refs for generated outputs, when known. */
 	generatedFrom?: ReviewTechnicalReference[];
+	/** Advisory provenance hint for the reviewer; never an authorization input. */
+	origin?: ReviewChangeOrigin;
 	/** Non-secret JSON metadata for diagnostics; not a UI label. */
 	metadata?: JsonObject;
 }

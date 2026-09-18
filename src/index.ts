@@ -71,3 +71,35 @@ export {
 	writeYamlFileAtomic,
 } from "./yamlIo.ts";
 export * from "./types.ts";
+export {
+	discardDraft,
+	ForeignChangeError,
+	type DiscardOptions,
+	type DiscardResult,
+	type DiscardedPath,
+} from "./discard.ts";
+export {
+	clearDraftOrigins,
+	clearDraftOwner,
+	clearDraftProvenance,
+	isForeignChange,
+	readDraftOrigins,
+	readDraftOwner,
+	recordDraftOrigin,
+	resolveDraftOrigins,
+	setDraftOwnerIfAbsent,
+	type DraftOriginKind,
+	type DraftOriginRecord,
+	type DraftOwner,
+} from "./origin.ts";
+export {
+	collectInputChanges,
+	computeReviewSnapshot,
+	globToRegExp,
+	type ReviewOptions,
+} from "./review.ts";
+export {
+	structuralDiff,
+	summarizeValue,
+	type StructuralDiffResult,
+} from "./structuralDiff.ts";

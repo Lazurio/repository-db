@@ -36,6 +36,12 @@ A normal user must be able to answer four questions without opening Git:
 | **Publish** | The one explicit action turning the draft into a validated, audited commit and pushing it. Always the Principal's act. |
 | **Discard** | Returning one resource, one path or the whole draft to the last published state. |
 
+**Paths in this document are relative to the data checkout**, which a module
+mounts at `db/`. A path written here as `data/deals/deal-1002.yaml` is therefore
+`db/data/deals/deal-1002.yaml` seen from the module root. It is not the module's
+own `data/` directory — in a module that still carries a v2 layer, `data/v2/` is
+legacy v2 data and `db/` is the v3 repository-db mount. The two never mix.
+
 ## Architecture: four layers
 
 ```
@@ -117,10 +123,14 @@ Everything the card can do, an agent can do headlessly, and both see the same
 truth:
 
 ```bash
-repository-db review [--json]
-repository-db discard --resource <id> | --path <p> | --all [--confirm-foreign]
+repository-db review  [--json] [--inputs]
+repository-db discard (--path <p>... | --all) [--actor <actor>] [--confirm-foreign] [--json]
+repository-db origin  --path <p>... --kind app|agent|external --actor <actor> [--source <s>]
 repository-db publish --actor "…" --source "…"
 ```
+
+An agent stamps its own writes with `origin --kind agent` so a reviewer can tell
+them apart from writes made by a person inside the app.
 
 ## 2. Host API convention
 

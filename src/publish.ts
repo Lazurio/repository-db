@@ -25,6 +25,7 @@ import {
 	runValidateCommands,
 } from "./generated.ts";
 import { ENGINE_DIR, acquirePublishLock } from "./lock.ts";
+import { clearDraftProvenance } from "./origin.ts";
 import { buildCommitMessage, newChangeId } from "./trailers.ts";
 import { writeFileAtomic } from "./yamlIo.ts";
 import {
@@ -246,6 +247,8 @@ export async function publish(
 						`git push failed; local commits stay unpushed (committed_not_pushed). Detail: ${pushOnly.stderr.trim()}`,
 					);
 				}
+				// The draft that the provenance markers described is now published.
+				clearDraftProvenance(mountRoot);
 				return {
 					state: "published",
 					commit: gitHeadCommit(mountRoot),
@@ -301,6 +304,7 @@ export async function publish(
 			);
 		}
 
+		clearDraftProvenance(mountRoot);
 		return {
 			state: "published",
 			commit: gitHeadCommit(mountRoot),

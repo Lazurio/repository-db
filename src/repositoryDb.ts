@@ -7,6 +7,19 @@ import {
 	markConflictResolved,
 } from "./conflict.ts";
 import { loadRepositoryDbConfig } from "./config.ts";
+import {
+	type DiscardOptions,
+	type DiscardResult,
+	discardDraft,
+} from "./discard.ts";
+import {
+	type DraftOriginKind,
+	type DraftOwner,
+	clearDraftProvenance,
+	readDraftOwner,
+	recordDraftOrigin,
+} from "./origin.ts";
+import { type ReviewOptions, computeReviewSnapshot } from "./review.ts";
 import { gitFetchAsync } from "./git.ts";
 import { runValidateCommands } from "./generated.ts";
 import { publish, pullRemote, type PullResult } from "./publish.ts";
@@ -17,6 +30,7 @@ import {
 } from "./status.ts";
 import type {
 	ConflictState,
+	ReviewSurfaceSnapshot,
 	PublishOptions,
 	PublishResult,
 	RepositoryDbConfig,
@@ -78,6 +92,45 @@ export class RepositoryDb {
 	/** Fetch + integrate remote changes (autostash-safe, conflict-guarded). */
 	pull(): Promise<PullResult> {
 		return pullRemote(this.mountRoot, this.config);
+	}
+
+	/**
+	 * Resolve the current draft into reviewable resources with business labels,
+	 * app routes and structural field diffs. A path no adapter claims still
+	 * appears, degraded to a generic or technical diff — never hidden.
+	 */
+	review(options: ReviewOptions = {}): Promise<ReviewSurfaceSnapshot> {
+		return computeReviewSnapshot(this.mountRoot, this.config, options);
+	}
+
+	/**
+	 * Return draft work to the last published state, per path or as a whole.
+	 * Refuses changes the requesting actor cannot claim unless the caller
+	 * confirms explicitly.
+	 */
+	discard(options: DiscardOptions = {}): DiscardResult {
+		return discardDraft(this.mountRoot, this.config, options);
+	}
+
+	/**
+	 * Record where a write came from, right after the host API or CLI performed
+	 * it. Advisory provenance only; never an authorization input.
+	 */
+	recordOrigin(
+		paths: readonly string[],
+		origin: { kind: DraftOriginKind; actor?: string; source?: string },
+	): void {
+		recordDraftOrigin(this.mountRoot, paths, origin);
+	}
+
+	/** Coarse label for the whole draft: who wrote first after the last publish. */
+	draftOwner(): DraftOwner | undefined {
+		return readDraftOwner(this.mountRoot);
+	}
+
+	/** Drop both provenance markers; the draft they described no longer exists. */
+	clearDraftProvenance(): void {
+		clearDraftProvenance(this.mountRoot);
 	}
 
 	conflict(): ConflictState | undefined {
