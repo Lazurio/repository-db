@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { lstatSync, readFileSync, readlinkSync } from "node:fs";
 import path from "node:path";
 import { isPathDeclared } from "./generated.ts";
-import { gitDirtyPaths, gitHeadCommit } from "./git.ts";
+import { gitDirtyPaths, gitHeadCommit, gitRenameSources } from "./git.ts";
 import { ENGINE_DIR } from "./lock.ts";
 import type { RepositoryDbConfig } from "./types.ts";
 
@@ -80,10 +80,23 @@ function contentHash(mountRoot: string, dirtyPaths: readonly string[]): string {
 	return hash.digest("hex");
 }
 
+/**
+ * Every path the draft touches, independent of how Git happens to split it.
+ *
+ * A staged rename is one entry reported by its new path; the same change after
+ * an autostash apply is a staged add plus an unstaged delete. Hashing Git's
+ * report as-is would make the two look like different drafts — and publish,
+ * which integrates between its two checks, would refuse its own confirmed
+ * draft. Adding rename sources makes both shapes the same set of paths.
+ */
+function draftPaths(mountRoot: string): string[] {
+	return [
+		...new Set([...gitDirtyPaths(mountRoot), ...gitRenameSources(mountRoot).values()]),
+	].filter((entry) => !entry.startsWith(`${ENGINE_DIR}/`));
+}
+
 export function computeDraftRevisionParts(mountRoot: string): DraftRevisionParts {
-	const dirtyPaths = gitDirtyPaths(mountRoot).filter(
-		(entry) => !entry.startsWith(`${ENGINE_DIR}/`),
-	);
+	const dirtyPaths = draftPaths(mountRoot);
 	return {
 		baseline: gitHeadCommit(mountRoot) ?? "no-head",
 		content: contentHash(mountRoot, dirtyPaths),
@@ -127,8 +140,7 @@ export function computeCanonicalContentHash(
 	config: RepositoryDbConfig,
 ): string {
 	const generatedPrefix = `${config.layout.generated}/`;
-	const dirtyPaths = gitDirtyPaths(mountRoot)
-		.filter((entry) => !entry.startsWith(`${ENGINE_DIR}/`))
+	const dirtyPaths = draftPaths(mountRoot)
 		.filter((entry) => entry !== config.layout.generated)
 		.filter((entry) => !entry.startsWith(generatedPrefix))
 		// A declared artifact may live outside the generated layout; its

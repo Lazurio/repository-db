@@ -685,11 +685,13 @@ describe("round 3 — a live local lock is never taken over by age", () => {
 
 	test("an hour-old lock of a running local process still holds the gate", async () => {
 		const os = await import("node:os");
+		const { spawn } = await import("node:child_process");
 		const fixture = createFixtureRepo();
+		// A genuinely separate, running process stands in for a long publish.
+		const holder = spawn("sleep", ["30"], { stdio: "ignore" });
 		try {
-			// This test process is alive; its lock is well past the old 15-minute cut.
 			const lockFile = writeLock(fixture.mountPath, {
-				pid: process.pid,
+				pid: holder.pid,
 				hostname: os.hostname(),
 				acquiredAt: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
 				token: "long-publish",
@@ -700,6 +702,41 @@ describe("round 3 — a live local lock is never taken over by age", () => {
 				/publish or discard is in progress/,
 			);
 			expect(JSON.parse(readFileSync(lockFile, "utf8")).token).toBe("long-publish");
+		} finally {
+			holder.kill("SIGKILL");
+			rmSync(fixture.root, { recursive: true, force: true });
+		}
+	});
+
+	test("a lock left with our own pid by a crashed previous incarnation is reclaimed", async () => {
+		const os = await import("node:os");
+		const fixture = createFixtureRepo();
+		try {
+			// The container-restart shape: same hostname, the new app got the same
+			// pid, and the lock carries a token this process never issued.
+			writeLock(fixture.mountPath, {
+				pid: process.pid,
+				hostname: os.hostname(),
+				acquiredAt: new Date().toISOString(),
+				token: "previous-incarnation",
+			});
+			const release = acquirePublishLock(fixture.mountPath);
+			release();
+		} finally {
+			rmSync(fixture.root, { recursive: true, force: true });
+		}
+	});
+
+	test("our own live lock is not mistaken for an abandoned one", () => {
+		const fixture = createFixtureRepo();
+		try {
+			const release = acquirePublishLock(fixture.mountPath);
+			try {
+				// Same pid, but a token this process did issue and still holds.
+				expect(() => acquirePublishLock(fixture.mountPath)).toThrow(/already running/);
+			} finally {
+				release();
+			}
 		} finally {
 			rmSync(fixture.root, { recursive: true, force: true });
 		}
@@ -741,6 +778,58 @@ describe("round 3 — a live local lock is never taken over by age", () => {
 			});
 			const release = acquirePublishLock(fixture.mountPath);
 			release();
+		} finally {
+			rmSync(fixture.root, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("round 3 — a confirmed publish of a staged rename does not refuse itself", () => {
+	test("publishes after integration splits the rename", async () => {
+		const fixture = createFixtureRepo();
+		try {
+			writeFixtureDocument(fixture.mountPath, "old-name", { name: "Published" });
+			publishBaseline(fixture);
+			// An agent renames a record; a colleague publishes meanwhile, so the
+			// publish integrates and its autostash turns the rename into an add
+			// plus an unstaged delete.
+			git(fixture.mountPath, ["mv", "data/things/old-name.yaml", "data/things/new-name.yaml"]);
+			publishRemoteChange(fixture);
+
+			const db = RepositoryDb.open(fixture.mountPath);
+			const snapshot = await db.review();
+			const result = await db.publish({
+				actor: ACTOR,
+				source: "test",
+				expectedRevision: snapshot.draftRevision,
+				skipValidate: true,
+			});
+
+			expect(result.state).toBe("published");
+			const remoteTree = git(fixture.originPath, ["ls-tree", "-r", "--name-only", fixture.branch]);
+			expect(remoteTree).toContain("data/things/new-name.yaml");
+			expect(remoteTree).not.toContain("data/things/old-name.yaml");
+		} finally {
+			rmSync(fixture.root, { recursive: true, force: true });
+		}
+	});
+
+	test("publishes a staged rename even with nothing to integrate", async () => {
+		const fixture = createFixtureRepo();
+		try {
+			writeFixtureDocument(fixture.mountPath, "old-name", { name: "Published" });
+			publishBaseline(fixture);
+			git(fixture.mountPath, ["mv", "data/things/old-name.yaml", "data/things/new-name.yaml"]);
+
+			const db = RepositoryDb.open(fixture.mountPath);
+			const snapshot = await db.review();
+			const result = await db.publish({
+				actor: ACTOR,
+				source: "test",
+				expectedRevision: snapshot.draftRevision,
+				skipValidate: true,
+			});
+			expect(result.state).toBe("published");
 		} finally {
 			rmSync(fixture.root, { recursive: true, force: true });
 		}

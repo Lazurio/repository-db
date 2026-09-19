@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- A confirmed publish of a draft with a staged rename no longer refuses itself:
+  the revision and the pre-staging check hash one path set that does not depend
+  on how Git splits a rename, which an autostash apply changes.
+- A lock carrying this process's own pid that it never issued — a crashed
+  previous incarnation, typically after a container restart — is reclaimed,
+  instead of blocking every write for good. The standard lists the remaining
+  pid-reuse and cross-host limits.
+
 - A lock held by a running process on this machine is never taken over,
   however old it is; only a dead local holder or a lock from another host older
   than 15 minutes is reclaimed. Previously any lock past 15 minutes could be

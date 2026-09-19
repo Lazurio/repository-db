@@ -46,6 +46,26 @@ function readLock(filePath: string): LockPayload | undefined {
 	}
 }
 
+/** Tokens of locks this process currently holds. */
+const heldTokens = new Set<string>();
+
+/**
+ * Is a lock written on this machine abandoned?
+ *
+ * Liveness is the test, never age: a running holder keeps the gate however long
+ * its publish takes. One case needs care — a lock carrying *this* process's pid
+ * that this process never issued. That is a previous incarnation which crashed
+ * and whose pid was handed to us again, the usual shape of a container
+ * restarting under the same hostname. Treating it as live would block every
+ * write for good, so it counts as abandoned.
+ */
+function isLocalLockAbandoned(lock: LockPayload): boolean {
+	if (lock.pid === process.pid) {
+		return !(lock.token && heldTokens.has(lock.token));
+	}
+	return !isProcessAlive(lock.pid);
+}
+
 /**
  * Acquire the publish mutual-exclusion lock. Throws {@link PublishLockedError}
  * when another live publish holds it. Returns a release function.
@@ -64,7 +84,7 @@ export function acquirePublishLock(mountRoot: string): () => void {
 		// middle of a long publish. Age decides only for a lock from another
 		// host, whose process cannot be checked from here.
 		const stale = sameHost
-			? !isProcessAlive(existing.pid)
+			? isLocalLockAbandoned(existing)
 			: Number.isFinite(age) && age > STALE_LOCK_MS;
 		if (!stale) {
 			throw new PublishLockedError(
@@ -93,7 +113,10 @@ export function acquirePublishLock(mountRoot: string): () => void {
 		);
 	}
 
+	if (payload.token) heldTokens.add(payload.token);
+
 	return () => {
+		if (payload.token) heldTokens.delete(payload.token);
 		const current = readLock(filePath);
 		if (current?.token === payload.token) {
 			rmSync(filePath, { force: true });
