@@ -23,7 +23,9 @@
   silently (Git's fast-forward overwrites a missing tracked file). Changed
   paths (`remoteChanges`, the pull check, the unsent generated check) are read
   NUL-separated and without rename detection: names with diacritics come back
-  as they are on disk and both sides of a rename are listed.
+  as they are on disk and both sides of a rename are listed. A conflict an
+  older engine recorded with its draft in a stash is not undone automatically
+  any more; abort names the exact reset and stash commands instead.
 
 - **The engine owns the whole publish lifecycle.** `publish` confirms the draft
   revision, validates, materializes, commits and sends. Sending replays onto a

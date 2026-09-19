@@ -136,6 +136,17 @@ export function abortConflict(mountRoot: string, branch: string): void {
 	}
 	const unmerged = gitUnmergedPaths(mountRoot);
 	if (unmerged.length > 0) {
+		// An engine before the send lane recorded conflicted autostash applies;
+		// this version no longer restores them, so it says how to by hand.
+		const legacy = readConflictState(mountRoot) as
+			| (ConflictState & { preOperationHead?: string; autostashSha?: string })
+			| undefined;
+		if (legacy?.autostashSha) {
+			throw new RepositoryDbError(
+				"abort_incomplete",
+				`this conflict was recorded by an older repository-db, which set the draft aside in a stash. To undo it: git reset --hard ${legacy.preOperationHead ?? "<the commit before the publish>"} && git stash apply ${legacy.autostashSha}, then run conflict --resolved`,
+			);
+		}
 		throw new RepositoryDbError(
 			"abort_incomplete",
 			`unresolved conflict markers remain that repository-db did not create (${unmerged.join(", ")}); resolve them by hand, then run conflict --resolved`,

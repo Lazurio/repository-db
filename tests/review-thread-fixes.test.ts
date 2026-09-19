@@ -342,3 +342,46 @@ describe("changed paths are reported as they are named on disk", () => {
 		}
 	});
 });
+
+describe("a conflict recorded by an older engine", () => {
+	test("abort says exactly how to restore the stashed draft", () => {
+		const fixture = createFixtureRepo();
+		try {
+			const db = RepositoryDb.open(fixture.mountPath);
+			writeFixtureDocument(fixture.mountPath, "shared", { name: "base" });
+			git(fixture.mountPath, ["add", "--all"]);
+			git(fixture.mountPath, ["commit", "--message", "base"]);
+			const before = git(fixture.mountPath, ["rev-parse", "HEAD"]).trim();
+			writeFixtureDocument(fixture.mountPath, "shared", { name: "stashed" });
+			git(fixture.mountPath, ["stash", "push", "--quiet"]);
+			const stash = git(fixture.mountPath, ["rev-parse", "stash@{0}"]).trim();
+			writeFixtureDocument(fixture.mountPath, "shared", { name: "committed" });
+			git(fixture.mountPath, ["commit", "--quiet", "--all", "--message", "other"]);
+			Bun.spawnSync(["git", "-C", fixture.mountPath, "stash", "apply"]);
+			mkdirSync(path.join(fixture.mountPath, ".repository-db"), { recursive: true });
+			writeFileSync(
+				path.join(fixture.mountPath, ".repository-db/conflict.json"),
+				JSON.stringify({
+					schemaVersion: "repository-db.conflict.v1",
+					detectedAt: "2026-09-01T08:00:00.000Z",
+					operation: "publish",
+					gitState: "autostash apply conflicted",
+					message: "older engine",
+					handoff: "repository-db conflict --abort",
+					preOperationHead: before,
+					autostashSha: stash,
+				}),
+				"utf8",
+			);
+
+			expect(() => db.abortConflict()).toThrow(
+				expect.objectContaining({
+					code: "abort_incomplete",
+					message: expect.stringContaining(`git stash apply ${stash}`),
+				}),
+			);
+		} finally {
+			rmSync(fixture.root, { recursive: true, force: true });
+		}
+	});
+});
