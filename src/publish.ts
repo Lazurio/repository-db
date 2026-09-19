@@ -157,6 +157,16 @@ async function send(
 	let remoteChanges: string[] = [];
 	if (head && remoteHead) {
 		if (runGit(mountRoot, ["merge-base", "--is-ancestor", head, remoteHead]).status === 0) {
+			// The remote already has these commits — an earlier push arrived even
+			// though it reported failure — and maybe colleagues' work on top.
+			// Nothing to send; catch the checkout up to what is published.
+			if (head !== remoteHead) {
+				remoteChanges = runGitOrThrow(mountRoot, ["diff", "--name-only", head, remoteHead])
+					.split("\n")
+					.filter(Boolean);
+				runGitOrThrow(mountRoot, ["reset", "--keep", remoteHead]);
+			}
+			clearDraftProvenance(mountRoot);
 			return { pushed: false, remoteChanges };
 		}
 		const behind = runGit(mountRoot, ["merge-base", "--is-ancestor", remoteHead, head]).status !== 0;
@@ -316,7 +326,7 @@ export async function finishSend(
 			);
 		}
 		const { pushed, remoteChanges } = await send(mountRoot, config, "finish-send");
-		if (!pushed) return { state: "nothing_to_publish" };
+		if (!pushed) return { state: "nothing_to_publish", remoteChanges };
 		return {
 			state: "published",
 			commit: gitHeadCommit(mountRoot),

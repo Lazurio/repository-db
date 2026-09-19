@@ -149,4 +149,36 @@ describe("a failed send leaves one waiting commit; finishing it is a separate op
 			rmSync(fixture.root, { recursive: true, force: true });
 		}
 	});
+
+	test("when the lost push arrived and a colleague published on top, finishing catches up without sending", async () => {
+		const fixture = createFixtureRepo();
+		try {
+			const db = RepositoryDb.open(fixture.mountPath);
+			writeFixtureDocument(fixture.mountPath, "mine", { name: "Mine" });
+			git(fixture.mountPath, ["add", "--all"]);
+			git(fixture.mountPath, ["commit", "--message", "push reported failure but arrived"]);
+			const head = git(fixture.mountPath, ["rev-parse", "HEAD"]).trim();
+			git(fixture.mountPath, ["push", "--quiet", "origin", `HEAD:${fixture.branch}`]);
+			git(fixture.mountPath, ["update-ref", `refs/remotes/origin/${fixture.branch}`, `${head}~1`]);
+
+			const second = cloneFixture(fixture);
+			writeFixtureDocument(second, "theirs", { name: "Theirs" });
+			git(second, ["add", "data"]);
+			git(second, ["commit", "--message", "colleague on top"]);
+			git(second, ["push", "--quiet", "origin", fixture.branch]);
+			const theirs = git(second, ["rev-parse", "HEAD"]).trim();
+
+			const result = await db.finishSend({ expectedHead: head });
+			expect(result.state).toBe("nothing_to_publish");
+			expect(result.remoteChanges).toEqual(["data/things/theirs.yaml"]);
+			// Caught up with what is published; nothing waits, nothing is dirty.
+			expect(git(fixture.mountPath, ["rev-parse", "HEAD"]).trim()).toBe(theirs);
+			expect(git(fixture.originPath, ["rev-parse", fixture.branch]).trim()).toBe(theirs);
+			const status = db.status();
+			expect(status.state).toBe("published");
+			expect(status.ahead).toBe(0);
+		} finally {
+			rmSync(fixture.root, { recursive: true, force: true });
+		}
+	});
 });
