@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Finishing a send checks for draft changes first and runs neither validation
+  nor materializers, so a materializer that is not byte-identical on every run
+  can no longer make it refuse itself or add a commit.
+- An own-pid lock written by an older engine version (no recorded process
+  start) ages out after 15 minutes as before, so an upgrade after a crash does
+  not shut the gate for good. Reclaiming removes a stale lock only if it is still
+  the lock that was judged, so the slower of two acquirers cannot delete the
+  faster one's fresh lock.
+
 - A confirmed publish of a draft with a staged rename no longer refuses itself:
   the revision and the pre-staging check hash one path set that does not depend
   on how Git splits a rename, which an autostash apply changes.

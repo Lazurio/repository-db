@@ -253,6 +253,23 @@ export async function publish(
 			}
 		}
 
+		// Finishing a send pushes a commit that already exists and was validated
+		// when it was made. It must not run validation or materializers: a
+		// materializer that is not byte-identical on every run would dirty the
+		// tree and make the send refuse itself on every retry. So the dirty check
+		// comes first, and nothing that writes the tree runs at all.
+		if (options.finishSendOnly) {
+			const pendingDraft = gitDirtyPaths(mountRoot).filter(
+				(entry) => !entry.startsWith(`${ENGINE_DIR}/`),
+			);
+			if (pendingDraft.length > 0) {
+				throw new RepositoryDbError(
+					"new_draft_present",
+					"There are draft changes beyond the commit waiting to be sent. Finishing the send would publish them unreviewed; review the draft and publish it explicitly instead.",
+				);
+			}
+		}
+
 		stageTrackedPublishLockCleanup(mountRoot);
 		// Captured after publish's own repair step and before validate and
 		// materialize, because those run configured commands that take time.
@@ -262,10 +279,10 @@ export async function publish(
 			options.expectedRevision === undefined
 				? undefined
 				: computeCanonicalContentHash(mountRoot, config);
-		if (!options.skipValidate) {
+		if (!options.skipValidate && !options.finishSendOnly) {
 			runValidateCommands(mountRoot, config);
 		}
-		if (!options.skipMaterialize) {
+		if (!options.skipMaterialize && !options.finishSendOnly) {
 			materializeGenerated(mountRoot, config);
 		}
 		assertDeclaredGeneratedOnly(mountRoot, config);
@@ -273,12 +290,6 @@ export async function publish(
 		const dirtyPaths = gitDirtyPaths(mountRoot).filter(
 			(entry) => !entry.startsWith(`${ENGINE_DIR}/`),
 		);
-		if (options.finishSendOnly && dirtyPaths.length > 0) {
-			throw new RepositoryDbError(
-				"new_draft_present",
-				"There are draft changes beyond the commit waiting to be sent. Finishing the send would publish them unreviewed; review the draft and publish it explicitly instead.",
-			);
-		}
 		if (dirtyPaths.length === 0) {
 			// Recovery path: a previous publish committed but could not push
 			// (or a conflict was resolved into a local commit). Just push.

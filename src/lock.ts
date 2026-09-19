@@ -101,14 +101,39 @@ const UNREADABLE_LOCK_GRACE_MS = 5_000;
  */
 function isLocalLockAbandoned(lock: LockPayload): boolean {
 	if (lock.pid === process.pid) {
+		// A lock from an older engine version records no process start. It can
+		// only have been left by a predecessor that ran that version — a live
+		// sibling would be running this one — so the previous age rule applies,
+		// and an upgrade after a crash does not leave the gate shut for good.
+		if (lock.processStart === undefined) {
+			const age = Date.now() - Date.parse(lock.acquiredAt);
+			return Number.isFinite(age) && age > STALE_LOCK_MS;
+		}
 		const ours = ownProcessStart();
-		// Without a reading on either side we cannot tell a predecessor from a
-		// sibling thread, so we keep the lock: a wrongly kept lock is recoverable
-		// by hand, a wrongly taken one silently opens the gate.
-		if (!ours || !lock.processStart) return false;
+		// Without a reading we cannot tell a predecessor from a sibling thread,
+		// so the lock is kept: a wrongly kept lock is recoverable by hand, a
+		// wrongly taken one silently opens the gate.
+		if (!ours || lock.processStart === "unavailable") return false;
 		return lock.processStart !== ours;
 	}
 	return !isProcessAlive(lock.pid);
+}
+
+/**
+ * Remove a lock judged abandoned — but only if it is still that lock.
+ *
+ * Two acquirers can judge the same stale file at once. Without this check the
+ * slower one deletes the fresh lock the faster one has just created, and both
+ * believe they hold the gate. Re-reading right before removal narrows that to
+ * the instant between the read and the unlink; the `wx` create that follows
+ * still admits only one of them.
+ */
+function removeIfUnchanged(filePath: string, judged: LockPayload | undefined): void {
+	const current = existsSync(filePath) ? readLock(filePath) : undefined;
+	// Compared whole, not by token: locks from older engine versions have none.
+	// `undefined` on both sides means "still unreadable", which is what was judged.
+	if (JSON.stringify(current) !== JSON.stringify(judged)) return;
+	rmSync(filePath, { force: true });
 }
 
 /**
@@ -135,7 +160,7 @@ export function acquirePublishLock(mountRoot: string): () => void {
 				`publish lock at ${filePath} is being written; try again in a moment`,
 			);
 		}
-		rmSync(filePath, { force: true });
+		removeIfUnchanged(filePath, undefined);
 	}
 	if (existing) {
 		const sameHost = existing.hostname === os.hostname();
@@ -154,7 +179,7 @@ export function acquirePublishLock(mountRoot: string): () => void {
 					`remove ${filePath} only if you are sure that process is gone`,
 			);
 		}
-		rmSync(filePath, { force: true });
+		removeIfUnchanged(filePath, existing);
 	}
 
 	const payload: LockPayload = {
@@ -162,7 +187,9 @@ export function acquirePublishLock(mountRoot: string): () => void {
 		hostname: os.hostname(),
 		acquiredAt: new Date().toISOString(),
 		token: randomUUID(),
-		processStart: ownProcessStart(),
+		// "unavailable" rather than absent: an absent field means a lock from an
+		// older engine version, which is handled differently below.
+		processStart: ownProcessStart() ?? "unavailable",
 	};
 	// "wx" fails when someone else recreated the lock between check and write.
 	try {
@@ -227,4 +254,9 @@ export function withDraftWriteLock<T>(mountRoot: string, write: () => T): T {
 /** Exposed for tests that write a lock "as another copy of this module" would. */
 export function ownProcessStartForTests(): string | undefined {
 	return ownProcessStart();
+}
+
+/** Exposed for the test that simulates two acquirers judging one stale lock. */
+export function removeIfUnchangedForTests(filePath: string, judged: unknown): void {
+	removeIfUnchanged(filePath, judged as LockPayload | undefined);
 }

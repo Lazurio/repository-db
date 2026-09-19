@@ -967,3 +967,106 @@ describe("round 3 — revert availability agrees with what review shows", () => 
 		}
 	});
 });
+
+describe("round 3 — finishing a send runs nothing that writes the tree", () => {
+	test("a non-deterministic materializer cannot block or extend the send", async () => {
+		const fixture = createFixtureRepo();
+		try {
+			// A materializer whose output changes on every run (a timestamp).
+			const materializer = "sh -c 'date +%s%N > generated/stamp.txt'";
+			writeFileSync(
+				path.join(fixture.mountPath, "repository-db.yaml"),
+				[
+					"schema_version: repository-db.config.v1",
+					"app: fixture",
+					`data_repo: {remote: ${fixture.originPath}, branch: ${fixture.branch}}`,
+					"schema: {name: fixture-data, version: 3.0.0-alpha.0}",
+					"layout: {data: data, generated: generated, scripts: scripts}",
+					"generated_manifest:",
+					"  - path: generated/stamp.txt",
+					`    materializer: ${JSON.stringify(materializer)}`,
+					"validate: []",
+					"",
+				].join("\n"),
+				"utf8",
+			);
+			publishBaseline(fixture);
+
+			const db = RepositoryDb.open(fixture.mountPath);
+			writeFixtureDocument(fixture.mountPath, "reviewed", { name: "Unsent" });
+			git(fixture.mountPath, ["add", "--all"]);
+			git(fixture.mountPath, ["commit", "--message", "publish that failed to push"]);
+			const pendingHead = git(fixture.mountPath, ["rev-parse", "HEAD"]).trim();
+
+			const result = await db.publish({
+				actor: ACTOR,
+				source: "test",
+				finishSendOnly: true,
+				expectedHead: pendingHead,
+			});
+
+			expect(result.state).toBe("published");
+			// Exactly the pending commit reached the remote, and nothing new was written.
+			expect(git(fixture.originPath, ["rev-parse", fixture.branch]).trim()).toBe(pendingHead);
+			expect(db.status().dirtyPaths).toEqual([]);
+		} finally {
+			rmSync(fixture.root, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("round 3 — upgrade and concurrency around reclaiming", () => {
+	test("an own-pid lock from an older engine version ages out as before", async () => {
+		const os = await import("node:os");
+		const fixture = createFixtureRepo();
+		try {
+			const lockFile = path.join(fixture.mountPath, ".repository-db", "publish.lock");
+			mkdirSync(path.dirname(lockFile), { recursive: true });
+			// Written by a predecessor on the previous engine: no processStart.
+			const legacy = { pid: process.pid, hostname: os.hostname() };
+			writeFileSync(lockFile, JSON.stringify({ ...legacy, acquiredAt: new Date().toISOString() }), "utf8");
+			expect(() => acquirePublishLock(fixture.mountPath)).toThrow(/already running/);
+
+			writeFileSync(
+				lockFile,
+				JSON.stringify({ ...legacy, acquiredAt: new Date(Date.now() - 60 * 60 * 1000).toISOString() }),
+				"utf8",
+			);
+			const release = acquirePublishLock(fixture.mountPath);
+			release();
+		} finally {
+			rmSync(fixture.root, { recursive: true, force: true });
+		}
+	});
+
+	test("a lock replaced after it was judged stale is not removed", async () => {
+		const os = await import("node:os");
+		const { spawn } = await import("node:child_process");
+		const fixture = createFixtureRepo();
+		const holder = spawn("sleep", ["30"], { stdio: "ignore" });
+		try {
+			const lockFile = path.join(fixture.mountPath, ".repository-db", "publish.lock");
+			mkdirSync(path.dirname(lockFile), { recursive: true });
+			// A dead holder's lock, as the slower of two acquirers first reads it...
+			writeFileSync(
+				lockFile,
+				JSON.stringify({ pid: 2_147_483_000, hostname: os.hostname(), acquiredAt: new Date().toISOString(), token: "dead" }),
+				"utf8",
+			);
+			// ...while the faster acquirer has already replaced it with a live one.
+			const { readFileSync: read } = await import("node:fs");
+			const judged = JSON.parse(read(lockFile, "utf8"));
+			writeFileSync(
+				lockFile,
+				JSON.stringify({ pid: holder.pid, hostname: os.hostname(), acquiredAt: new Date().toISOString(), token: "fresh" }),
+				"utf8",
+			);
+			const lockModule = await import("../src/lock.ts");
+			lockModule.removeIfUnchangedForTests(lockFile, judged);
+			expect(JSON.parse(read(lockFile, "utf8")).token).toBe("fresh");
+		} finally {
+			holder.kill("SIGKILL");
+			rmSync(fixture.root, { recursive: true, force: true });
+		}
+	});
+});
