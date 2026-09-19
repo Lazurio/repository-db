@@ -258,8 +258,10 @@ export function gitAheadBehind(repoRoot: string, branch: string): AheadBehind {
 		`${branch}...origin/${branch}`,
 	]);
 	if (result.status !== 0) {
-		// No upstream yet (fresh data repo before the first push).
-		return { ahead: 0, behind: 0 };
+		// No upstream yet (fresh data repo before the first push): every local
+		// commit is still unsent.
+		const local = runGit(repoRoot, ["rev-list", "--count", branch]);
+		return { ahead: local.status === 0 ? Number(local.stdout.trim()) || 0 : 0, behind: 0 };
 	}
 	const [ahead = "0", behind = "0"] = result.stdout.trim().split(/\s+/);
 	return { ahead: Number(ahead) || 0, behind: Number(behind) || 0 };

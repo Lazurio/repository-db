@@ -9,7 +9,9 @@
   every change a resource groups. **Breaking:** `readBaselineFile` needs the
   baseline (ref or config); it no longer defaults to HEAD. Finishing a send
   refuses a waiting commit that carries an undeclared generated file
-  (`generated_policy`), as review reports it.
+  (`generated_policy`), as review reports it. Without an upstream, local
+  commits count as waiting to be sent. The review snapshot's `baselineHead` is
+  the published baseline it compared with, not the local HEAD.
 
 - **The engine owns the whole publish lifecycle.** `publish` confirms the draft
   revision, validates, materializes, commits and sends. Sending replays onto a

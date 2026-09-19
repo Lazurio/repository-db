@@ -124,3 +124,35 @@ describe("the panel shows every change a resource groups", () => {
 		expect(model.records[0]?.summary).toBe("title změněno · status změněno");
 	});
 });
+
+describe("a changed document root is the empty JSON Pointer", () => {
+	test("a created document reports its root as \"\", not \"/\"", async () => {
+		const { structuralDiff } = await import("../src/structuralDiff.ts");
+		const result = structuralDiff(undefined, { name: "new" });
+		expect(result.fields.map((field) => field.fieldPath)).toEqual([""]);
+	});
+});
+
+describe("a waiting commit is recognised without an upstream too", () => {
+	test("status says it waits, publish points to finishing the send, and review compares with the published baseline", async () => {
+		const fixture = createFixtureRepo();
+		try {
+			const db = RepositoryDb.open(fixture.mountPath);
+			const published = git(fixture.mountPath, ["rev-parse", "HEAD"]).trim();
+			writeFixtureDocument(fixture.mountPath, "waiting", { name: "Waiting" });
+			git(fixture.mountPath, ["add", "--all"]);
+			git(fixture.mountPath, ["commit", "--message", "publish that failed to push"]);
+
+			// With the upstream known, the snapshot's baseline is the published commit.
+			expect((await db.review()).baselineHead).toBe(published);
+
+			git(fixture.mountPath, ["update-ref", "-d", `refs/remotes/origin/${fixture.branch}`]);
+			expect(db.status().state).toBe("committed_not_pushed");
+			await expect(
+				db.publish({ actor: "a <a@a>", source: "test", expectedRevision: db.draftRevision() }),
+			).rejects.toMatchObject({ code: "send_pending" });
+		} finally {
+			rmSync(fixture.root, { recursive: true, force: true });
+		}
+	});
+});

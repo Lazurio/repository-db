@@ -7,12 +7,11 @@ import { isPathDeclared, undeclaredGeneratedDiffs } from "./generated.ts";
 import {
 	gitBatchShow,
 	gitDirtyPaths,
-	gitHeadCommit,
 	gitRenameSources,
 	runGit,
 } from "./git.ts";
 import { ENGINE_DIR } from "./lock.ts";
-import { computeDraftRevision } from "./draftRevision.ts";
+import { computeDraftRevision, parseDraftRevision } from "./draftRevision.ts";
 import { type DraftOriginRecord, resolveDraftOrigins } from "./origin.ts";
 import { structuralDiff } from "./structuralDiff.ts";
 import {
@@ -261,8 +260,9 @@ const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 export function collectInputChanges(
 	mountRoot: string,
 	config: RepositoryDbConfig,
+	/** The published baseline to compare with; resolved here when omitted. */
+	baselineRef: string = reviewBaselineRef(mountRoot, config),
 ): ReviewInputChange[] {
-	const baselineRef = reviewBaselineRef(mountRoot, config);
 	// Git reports a rename by its new path only. The old path is a published
 	// record that the publish will delete, so it is listed too — otherwise the
 	// deletion would reach the remote without ever being shown.
@@ -509,7 +509,10 @@ export async function computeReviewSnapshot(
 	// confirmation fails closed. Taking it afterwards would do the opposite —
 	// confirm a draft holding a change that was never shown.
 	const draftRevision = computeDraftRevision(mountRoot);
-	const inputs = collectInputChanges(mountRoot, config);
+	// The published version the resources are compared with — reported as the
+	// snapshot's baseline, not the local HEAD a waiting commit sits on.
+	const baselineRef = reviewBaselineRef(mountRoot, config);
+	const inputs = collectInputChanges(mountRoot, config, baselineRef);
 	const remaining = new Map(inputs.map((input) => [input.changeId, input]));
 	const resources: ReviewableResource[] = [];
 	const adapterFailures: string[] = [];
@@ -553,10 +556,12 @@ export async function computeReviewSnapshot(
 	}
 
 	const snapshotLevel = worstLevel(resources.map((resource) => resource.fallback.activeLevel));
-	const head = gitHeadCommit(mountRoot) ?? "";
+	// The HEAD the revision was taken at, so finishing a send names exactly it.
+	const revisionHead = parseDraftRevision(draftRevision).baseline;
+	const head = revisionHead === "no-head" ? "" : revisionHead;
 	const snapshot: ReviewSurfaceSnapshot = {
 		reviewContractVersion: REVIEW_SURFACE_CONTRACT_VERSION,
-		baselineHead: head,
+		baselineHead: baselineRef,
 		draftRevision,
 		head,
 		computedAt: options.computedAt,
