@@ -18,6 +18,7 @@ import {
 } from "./git.ts";
 import {
 	assertDeclaredGeneratedOnly,
+	isPathDeclared,
 	materializeGenerated,
 	runValidateCommands,
 } from "./generated.ts";
@@ -130,6 +131,34 @@ function laneConflictHandoff(mountRoot: string, branch: string): string {
 		"   a spusťte repository-db conflict --resolved.",
 		"Do té doby repository-db odmítá zápisy i publikaci.",
 	].join("\n");
+}
+
+/**
+ * The generated-output policy for commits that wait to be sent. Publish checks
+ * it before committing; a waiting commit made any other way is held to the same
+ * rule before it leaves, the same way review reports it.
+ */
+function assertUnsentGeneratedDeclared(mountRoot: string, config: RepositoryDbConfig): void {
+	const remoteRef = `refs/remotes/origin/${config.dataRepo.branch}`;
+	const hasRemote = runGit(mountRoot, ["rev-parse", "--verify", "--quiet", remoteRef]).status === 0;
+	const unsent = runGitOrThrow(
+		mountRoot,
+		hasRemote
+			? ["diff", "--name-only", "-z", `${remoteRef}...HEAD`]
+			: ["ls-tree", "-r", "--name-only", "-z", "HEAD"],
+	)
+		.split("\0")
+		.filter(Boolean);
+	const generatedPrefix = `${config.layout.generated}/`;
+	const undeclared = unsent.filter(
+		(entry) => entry.startsWith(generatedPrefix) && !isPathDeclared(entry, config),
+	);
+	if (undeclared.length > 0) {
+		throw new RepositoryDbError(
+			"generated_policy",
+			`The commit waiting to be sent contains generated files not declared in generated_manifest (${undeclared.join(", ")}); it was not sent.`,
+		);
+	}
 }
 
 /**
@@ -325,6 +354,7 @@ export async function finishSend(
 				"There are draft changes beyond the commit waiting to be sent. Finishing the send would publish them unreviewed; review the draft and publish it explicitly instead.",
 			);
 		}
+		assertUnsentGeneratedDeclared(mountRoot, config);
 		const { pushed, remoteChanges } = await send(mountRoot, config, "finish-send");
 		if (!pushed) return { state: "nothing_to_publish", remoteChanges };
 		return {

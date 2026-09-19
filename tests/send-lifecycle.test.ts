@@ -181,4 +181,22 @@ describe("a failed send leaves one waiting commit; finishing it is a separate op
 			rmSync(fixture.root, { recursive: true, force: true });
 		}
 	});
+
+	test("a waiting commit with an undeclared generated file is not sent", async () => {
+		const fixture = createFixtureRepo();
+		try {
+			const db = RepositoryDb.open(fixture.mountPath);
+			writeFileSync(path.join(fixture.mountPath, "generated/rogue.json"), "{}\n", "utf8");
+			git(fixture.mountPath, ["add", "--all"]);
+			git(fixture.mountPath, ["commit", "--message", "committed outside publish"]);
+			const head = git(fixture.mountPath, ["rev-parse", "HEAD"]).trim();
+			const remoteBefore = git(fixture.originPath, ["rev-parse", fixture.branch]).trim();
+			await expect(db.finishSend({ expectedHead: head })).rejects.toMatchObject({
+				code: "generated_policy",
+			});
+			expect(git(fixture.originPath, ["rev-parse", fixture.branch]).trim()).toBe(remoteBefore);
+		} finally {
+			rmSync(fixture.root, { recursive: true, force: true });
+		}
+	});
 });

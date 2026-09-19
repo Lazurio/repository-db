@@ -7,7 +7,9 @@
   generated file in an unsent commit blocks publish readiness. The draft
   revision covers a nested repository's checked-out commit. The panel lists
   every change a resource groups. **Breaking:** `readBaselineFile` needs the
-  baseline (ref or config); it no longer defaults to HEAD.
+  baseline (ref or config); it no longer defaults to HEAD. Finishing a send
+  refuses a waiting commit that carries an undeclared generated file
+  (`generated_policy`), as review reports it.
 
 - **The engine owns the whole publish lifecycle.** `publish` confirms the draft
   revision, validates, materializes, commits and sends. Sending replays onto a
