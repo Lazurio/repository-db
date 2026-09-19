@@ -187,15 +187,19 @@ the draft revision:
 - a mismatch is refused with `record_changed` and the current revision. Nothing
   is written. `null` means "must not exist yet", so two people creating the same
   record cannot both win;
-- the revision belongs to **one concrete edit**. After a successful save that
-  edit continues from the returned revision — and only that edit: another
-  editor, or the same record opened again later, sends the revision of the
-  content it actually loaded. Nothing takes a newer revision on its own and
-  re-sends an old whole record with it; overwriting is a decision the person
-  makes on the version that is there;
-- a record reopened while an unsaved edit of it is still pending resumes that
-  edit, so there is one owner of that content: it is not lost, and it is not
-  sent later on its own over a newer save.
+- an edit holds **one base revision**: the version its editor loaded, then the
+  one its own last save returned — no history of earlier ones. Another editor,
+  or the same record opened again later, sends the revision of the content it
+  actually loaded. Nothing takes a newer revision on its own and re-sends an old
+  whole record with it; overwriting is a decision the person makes on the
+  version that is there;
+- one editor owns its unsaved content and its save. Closing it finishes the
+  save first; if that fails, the edit stays with its editor (or waits visibly
+  for a retry or a deliberate drop) and is never handed to another editor. A
+  clean editor takes newly loaded content with its revision; a dirty one keeps
+  its content and base revision. Draft actions are refused while an editor is
+  dirty, saving, or holds a failed save; an editor that saves by hand is never
+  saved just because someone publishes.
 
 Saving one record never depends on another record. The draft revision is not
 used for saves: with it, a colleague's change to a different deal would refuse
