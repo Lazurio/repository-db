@@ -11,7 +11,11 @@
   refuses a waiting commit that carries an undeclared generated file
   (`generated_policy`), as review reports it. Without an upstream, local
   commits count as waiting to be sent. The review snapshot's `baselineHead` is
-  the published baseline it compared with, not the local HEAD.
+  the published baseline it compared with, not the local HEAD. Publishing a new
+  draft on top of a waiting commit holds that commit to the same generated
+  policy. Discarding a draft that holds a nested repository is refused before
+  anything changes (`discard_unsupported`). Conflict markers left by another
+  tool point to resolving them, not to an abort that refuses them.
 
 - **The engine owns the whole publish lifecycle.** `publish` confirms the draft
   revision, validates, materializes, commits and sends. Sending replays onto a

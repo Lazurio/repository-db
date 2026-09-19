@@ -1,4 +1,4 @@
-import { rmSync } from "node:fs";
+import { lstatSync, rmSync } from "node:fs";
 import path from "node:path";
 import { assertDataRepoBoundary } from "./boundary.ts";
 import { activeConflict } from "./conflict.ts";
@@ -229,6 +229,18 @@ export function discardDraft(
 			for (const entry of dirtyPaths) {
 				if (existsInHead(mountRoot, entry)) restored.push(entry);
 				else removed.push(entry);
+			}
+			// An untracked directory entry is a nested repository. Discarding
+			// would delete it with everything inside, so the whole discard is
+			// refused before anything changes.
+			const nested = removed.filter((entry) =>
+				lstatSync(path.join(mountRoot, entry), { throwIfNoEntry: false })?.isDirectory(),
+			);
+			if (nested.length > 0) {
+				throw new RepositoryDbError(
+					"discard_unsupported",
+					`The draft contains a nested repository (${nested.join(", ")}). Discarding would delete it with everything inside; move or remove it by hand, then discard again.`,
+				);
 			}
 			runGitOrThrow(mountRoot, ["reset", "--hard", "HEAD"]);
 			for (const entry of removed) {

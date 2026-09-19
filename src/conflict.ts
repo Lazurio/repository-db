@@ -89,8 +89,10 @@ export function activeConflict(mountRoot: string): ConflictState | undefined {
 			gitState: `unmerged: ${unmerged.join(", ")}`,
 			message: "the data repository has unresolved merge conflicts",
 			handoff:
+				// Abort only undoes what repository-db itself started; these
+				// markers come from elsewhere, so resolving them is the way out.
 				"Resolve the conflict markers, `git add` the files, then run " +
-				"`repository-db conflict --resolved`, or restore via `repository-db conflict --abort`.",
+				"`repository-db conflict --resolved`.",
 		};
 	}
 	return undefined;

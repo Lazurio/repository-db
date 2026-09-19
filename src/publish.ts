@@ -279,6 +279,9 @@ export async function publish(
 		if (!options.skipValidate) runValidateCommands(mountRoot, config);
 		if (!options.skipMaterialize) materializeGenerated(mountRoot, config);
 		assertDeclaredGeneratedOnly(mountRoot, config);
+		// A commit already waiting below this draft leaves with it, so it is
+		// held to the same rule as when it is finished on its own.
+		assertUnsentGeneratedDeclared(mountRoot, config);
 
 		const dirtyPaths = engineDirFree(gitDirtyPaths(mountRoot));
 		runGitOrThrow(mountRoot, ["add", "--all"]);

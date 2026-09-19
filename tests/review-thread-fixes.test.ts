@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { computeDraftRevision } from "../src/draftRevision.ts";
 import { RepositoryDb } from "../src/repositoryDb.ts";
@@ -151,6 +151,70 @@ describe("a waiting commit is recognised without an upstream too", () => {
 			await expect(
 				db.publish({ actor: "a <a@a>", source: "test", expectedRevision: db.draftRevision() }),
 			).rejects.toMatchObject({ code: "send_pending" });
+		} finally {
+			rmSync(fixture.root, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("auto-review follow-ups", () => {
+	test("publish does not carry an undeclared generated file in a waiting commit below a new draft", async () => {
+		const fixture = createFixtureRepo();
+		try {
+			const db = RepositoryDb.open(fixture.mountPath);
+			writeFileSync(path.join(fixture.mountPath, "generated/rogue.json"), "{}\n", "utf8");
+			git(fixture.mountPath, ["add", "--all"]);
+			git(fixture.mountPath, ["commit", "--message", "committed outside publish"]);
+			writeFixtureDocument(fixture.mountPath, "new-draft", { name: "New draft" });
+			const remoteBefore = git(fixture.originPath, ["rev-parse", fixture.branch]).trim();
+			await expect(
+				db.publish({ actor: "a <a@a>", source: "test", expectedRevision: db.draftRevision() }),
+			).rejects.toMatchObject({ code: "generated_policy" });
+			expect(git(fixture.originPath, ["rev-parse", fixture.branch]).trim()).toBe(remoteBefore);
+		} finally {
+			rmSync(fixture.root, { recursive: true, force: true });
+		}
+	});
+
+	test("discarding a draft that holds a nested repository is refused before anything changes", () => {
+		const fixture = createFixtureRepo();
+		try {
+			const db = RepositoryDb.open(fixture.mountPath);
+			writeFixtureDocument(fixture.mountPath, "draft-record", { name: "Draft" });
+			const nested = path.join(fixture.mountPath, "data/nested");
+			mkdirSync(nested, { recursive: true });
+			git(fixture.root, ["init", "--quiet", nested]);
+			writeFileSync(path.join(nested, "a.txt"), "inside\n", "utf8");
+			const revision = db.draftRevision();
+			expect(() => db.discard({ scope: { kind: "draft" }, expectedRevision: revision })).toThrow(
+				expect.objectContaining({ code: "discard_unsupported" }),
+			);
+			expect(existsSync(path.join(nested, "a.txt"))).toBe(true);
+			expect(existsSync(path.join(fixture.mountPath, "data/things/draft-record.yaml"))).toBe(true);
+			expect(db.draftRevision()).toBe(revision);
+		} finally {
+			rmSync(fixture.root, { recursive: true, force: true });
+		}
+	});
+
+	test("markers left by someone else point to resolving, not to an abort that refuses them", () => {
+		const fixture = createFixtureRepo();
+		try {
+			const db = RepositoryDb.open(fixture.mountPath);
+			writeFixtureDocument(fixture.mountPath, "shared", { name: "base" });
+			git(fixture.mountPath, ["add", "--all"]);
+			git(fixture.mountPath, ["commit", "--message", "base"]);
+			writeFixtureDocument(fixture.mountPath, "shared", { name: "stashed" });
+			git(fixture.mountPath, ["stash", "push", "--quiet"]);
+			writeFixtureDocument(fixture.mountPath, "shared", { name: "committed" });
+			git(fixture.mountPath, ["commit", "--quiet", "--all", "--message", "other"]);
+			Bun.spawnSync(["git", "-C", fixture.mountPath, "stash", "apply"]);
+
+			const conflict = db.conflict();
+			expect(conflict?.operation).toBe("external");
+			expect(conflict?.handoff).toContain("conflict --resolved");
+			expect(conflict?.handoff).not.toContain("--abort");
+			expect(() => db.abortConflict()).toThrow(expect.objectContaining({ code: "abort_incomplete" }));
 		} finally {
 			rmSync(fixture.root, { recursive: true, force: true });
 		}
