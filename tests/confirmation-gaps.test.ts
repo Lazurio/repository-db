@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { randomBytes } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { DraftChangedError } from "../src/discard.ts";
@@ -611,6 +612,39 @@ describe("round 2 — a rename never hides the deleted record", () => {
 			);
 			expect(paths).toContain("data/things/old-name.yaml");
 			expect(paths).toContain("data/things/new-name.yaml");
+		} finally {
+			rmSync(fixture.root, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("a rewritten rename is two ordinary rows, each revertible alone", () => {
+	test("below Git's rename threshold, reverting one side leaves the other visible in the draft", async () => {
+		const fixture = createFixtureRepo();
+		try {
+			const db = RepositoryDb.open(fixture.mountPath);
+			writeFixtureDocument(fixture.mountPath, "old-name", { name: "Published", note: randomBytes(1500).toString("hex") });
+			publishBaseline(fixture);
+			git(fixture.mountPath, ["mv", "data/things/old-name.yaml", "data/things/new-name.yaml"]);
+			writeFixtureDocument(fixture.mountPath, "new-name", { name: "Rewritten", note: randomBytes(1500).toString("hex") });
+			git(fixture.mountPath, ["add", "--all"]);
+
+			const draftPaths = async () =>
+				(await db.review()).resources.map((resource) => resource.changes[0]?.technicalRefs[0]?.path);
+			expect(await draftPaths()).toEqual(
+				expect.arrayContaining(["data/things/old-name.yaml", "data/things/new-name.yaml"]),
+			);
+
+			// Reverting the new side alone removes it; the deleted old record is
+			// still a row of the draft, nothing is hidden.
+			db.discard({ scope: { kind: "record", path: "data/things/new-name.yaml" }, expectedRevision: db.draftRevision() });
+			expect(existsSync(path.join(fixture.mountPath, "data/things/new-name.yaml"))).toBe(false);
+			expect(await draftPaths()).toEqual(["data/things/old-name.yaml"]);
+
+			// Reverting that row restores the published record.
+			db.discard({ scope: { kind: "record", path: "data/things/old-name.yaml" }, expectedRevision: db.draftRevision() });
+			expect(existsSync(path.join(fixture.mountPath, "data/things/old-name.yaml"))).toBe(true);
+			expect(await draftPaths()).toEqual([]);
 		} finally {
 			rmSync(fixture.root, { recursive: true, force: true });
 		}

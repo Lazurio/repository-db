@@ -298,7 +298,7 @@ export function DraftPublishPanel({
 				if (
 					typeof window !== "undefined" &&
 					!window.confirm(
-						"Zrušit odeslání? Vaše změny zůstanou rozpracované a nic se nesmaže. Konfliktní záznamy pak vraťte nebo upravte a publikujte znovu.",
+						"Zrušit odeslání? Vaše změny zůstanou rozpracované a nic se nesmaže. Konfliktní záznamy pak vraťte, načtěte změny kolegy a svou úpravu udělejte znovu.",
 					)
 				) {
 					return;

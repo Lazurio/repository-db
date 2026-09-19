@@ -161,8 +161,10 @@ draft refuses and points there.
 **A conflict** while replaying — someone changed the same files — stops the
 send, records the conflict with the files involved, and blocks further writes
 and publishes. The checkout is untouched. **Abort** returns the commits that
-could not be sent to the draft, unchanged on disk; the user reverts or adjusts
-the conflicting records and publishes again. **Resolved** is for someone who
+could not be sent to the draft, unchanged on disk; the user reverts the
+conflicting records, pulls, and redoes the edit on top. (Adjusting them in place
+does not help: pull is fast-forward only, and the next send would conflict
+again.) **Resolved** is for someone who
 integrated by hand.
 
 `pull` never creates a conflict: Git carries a draft across a fast-forward and

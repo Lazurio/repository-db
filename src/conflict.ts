@@ -115,8 +115,9 @@ export function assertNoActiveConflict(mountRoot: string): void {
  * - A conflict the engine recorded while sending means local commits could
  *   not be replayed onto the remote. Those commits return to the draft
  *   (`reset --mixed` to where they branched off): nothing is lost, the files
- *   stay exactly as they are, and the user can revert or adjust the
- *   conflicting records and publish again.
+ *   stay exactly as they are. The way on is to revert the conflicting
+ *   records, pull the colleague's changes and redo the edit on top: pull is
+ *   fast-forward only, so an adjusted record would conflict again.
  */
 export function abortConflict(mountRoot: string, branch: string): void {
 	if (typeof branch !== "string" || !branch.trim()) {

@@ -126,7 +126,7 @@ function laneConflictHandoff(mountRoot: string, branch: string): string {
 	return [
 		"Někdo mezitím publikoval změny stejných souborů. Pracovní kopie zůstala beze změny.",
 		"a) repository-db conflict --abort vrátí čekající publikaci zpět do draftu;",
-		"   potom konfliktní záznamy vraťte nebo upravte a publikujte znovu.",
+		"   potom konfliktní záznamy vraťte, načtěte kolegovy změny a svou úpravu udělejte znovu.",
 		`b) Nebo změny začleňte ručně: cd ${mountRoot} && git rebase origin/${branch},`,
 		"   a spusťte repository-db conflict --resolved.",
 		"Do té doby repository-db odmítá zápisy i publikaci.",
