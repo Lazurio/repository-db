@@ -159,3 +159,27 @@ describe("integration conflicts happen in the lane, never in the checkout", () =
 		}
 	});
 });
+
+describe("abort never clears a conflict it could not undo", () => {
+	test("the low-level helper refuses without the branch and keeps the record", async () => {
+		const fixture = createFixtureRepo();
+		try {
+			const db = RepositoryDb.open(fixture.mountPath);
+			seedAndDivergeRemote(fixture);
+			writeFixtureDocument(fixture.mountPath, "thing-1", { name: "local-version" });
+			await expect(
+				db.publish({ actor: "a <a@a>", source: "test", expectedRevision: db.draftRevision() }),
+			).rejects.toThrow(/publish stopped/);
+
+			const { abortConflict } = await import("../src/conflict.ts");
+			expect(() => (abortConflict as (root: string) => void)(fixture.mountPath)).toThrow(
+				/needs the data branch/,
+			);
+			// Still blocked, and the unsent commit is still waiting.
+			expect(db.conflict()).toBeDefined();
+			expect(db.status().ahead).toBe(1);
+		} finally {
+			rmSync(fixture.root, { recursive: true, force: true });
+		}
+	});
+});

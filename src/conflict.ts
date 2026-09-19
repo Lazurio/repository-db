@@ -117,6 +117,14 @@ export function assertNoActiveConflict(mountRoot: string): void {
  *   conflicting records and publish again.
  */
 export function abortConflict(mountRoot: string, branch: string): void {
+	if (typeof branch !== "string" || !branch.trim()) {
+		// Without the branch the unsent commits cannot be found, and clearing the
+		// record anyway would unblock writes while they stay committed.
+		throw new RepositoryDbError(
+			"invalid_args",
+			"abortConflict needs the data branch (use RepositoryDb.abortConflict())",
+		);
+	}
 	const operation = gitOperationInProgress(mountRoot);
 	if (operation === "rebase-merge" || operation === "rebase-apply") {
 		runGitOrThrow(mountRoot, ["rebase", "--abort"]);
@@ -132,7 +140,13 @@ export function abortConflict(mountRoot: string, branch: string): void {
 	}
 	if (readConflictState(mountRoot)) {
 		const base = runGit(mountRoot, ["merge-base", "HEAD", `refs/remotes/origin/${branch}`]).stdout.trim();
-		if (base) runGitOrThrow(mountRoot, ["reset", "--mixed", "--quiet", base]);
+		if (!base) {
+			throw new RepositoryDbError(
+				"abort_incomplete",
+				`cannot find where the unsent commits branched off origin/${branch}; the conflict stays recorded — inspect ${mountRoot} by hand`,
+			);
+		}
+		runGitOrThrow(mountRoot, ["reset", "--mixed", "--quiet", base]);
 	}
 	rmSync(conflictPath(mountRoot), { force: true });
 }

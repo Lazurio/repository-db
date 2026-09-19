@@ -136,9 +136,20 @@ const records = db.collection("records", {
   parser: recordSchema, // any zod-compatible { parse(value) } object
 });
 
-records.put("record-123", record);      // local draft (no commit)
+// A save names the stored version it was edited from (null = new record);
+// a stale one is refused with RecordChangedError instead of overwriting.
+const revision = records.put("record-123", record, {}, { baseRevision: null });
 const status = await db.statusAsync({ fetch: true });
-const result = await db.publish({ actor: "Example User <user@example.com>", source: "sample-app-v1" });
+
+// Publish confirms the draft as it was shown: the revision from review().
+const { draftRevision } = await db.review();
+const result = await db.publish({
+  actor: "Example User <user@example.com>",
+  source: "sample-app-v1",
+  expectedRevision: draftRevision as string,
+});
+// If the push failed, the commit waits; finish it by its head, never re-publish.
+// await db.finishSend({ expectedHead });
 ```
 
 ## Development

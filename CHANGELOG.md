@@ -30,7 +30,9 @@
   `put` now returns the new revision.
 - Consumers pinned to earlier commits (Warehouse, General, Lumbio apps) keep
   working until they bump; a bump needs the revision on `publish` and
-  `finishSend` for push recovery.
+  `finishSend` for push recovery. The low-level `abortConflict(mountRoot,
+  branch)` helper refuses without the branch instead of clearing a conflict
+  it could not undo; `RepositoryDb.abortConflict()` supplies it.
 
 - Finishing a send skips the legacy-lock repair as well and refuses, rather
   than making a commit, if anything dirtied the tree after its first check.
