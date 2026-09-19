@@ -8,6 +8,7 @@ import { DraftChangedError } from "./discard.ts";
 import { computeDraftRevision } from "./draftRevision.ts";
 import {
 	gitAheadBehind,
+	gitChangedPaths,
 	gitDirtyPaths,
 	gitFetchAsync,
 	gitHeadCommit,
@@ -142,14 +143,11 @@ function laneConflictHandoff(mountRoot: string, branch: string): string {
 function assertUnsentGeneratedDeclared(mountRoot: string, config: RepositoryDbConfig): void {
 	const remoteRef = `refs/remotes/origin/${config.dataRepo.branch}`;
 	const hasRemote = runGit(mountRoot, ["rev-parse", "--verify", "--quiet", remoteRef]).status === 0;
-	const unsent = runGitOrThrow(
-		mountRoot,
-		hasRemote
-			? ["diff", "--name-only", "-z", `${remoteRef}...HEAD`]
-			: ["ls-tree", "-r", "--name-only", "-z", "HEAD"],
-	)
-		.split("\0")
-		.filter(Boolean);
+	const unsent = hasRemote
+		? gitChangedPaths(mountRoot, [`${remoteRef}...HEAD`])
+		: runGitOrThrow(mountRoot, ["ls-tree", "-r", "--name-only", "-z", "HEAD"])
+				.split("\0")
+				.filter(Boolean);
 	const undeclared = unsent.filter((entry) => isUndeclaredGenerated(entry, config));
 	if (undeclared.length > 0) {
 		throw new RepositoryDbError(
@@ -188,9 +186,7 @@ async function send(
 			// though it reported failure — and maybe colleagues' work on top.
 			// Nothing to send; catch the checkout up to what is published.
 			if (head !== remoteHead) {
-				remoteChanges = runGitOrThrow(mountRoot, ["diff", "--name-only", head, remoteHead])
-					.split("\n")
-					.filter(Boolean);
+				remoteChanges = gitChangedPaths(mountRoot, [head, remoteHead]);
 				runGitOrThrow(mountRoot, ["reset", "--keep", remoteHead]);
 			}
 			clearDraftProvenance(mountRoot);
@@ -198,9 +194,7 @@ async function send(
 		}
 		const behind = runGit(mountRoot, ["merge-base", "--is-ancestor", remoteHead, head]).status !== 0;
 		if (behind) {
-			remoteChanges = runGitOrThrow(mountRoot, ["diff", "--name-only", `${head}...${remoteHead}`])
-				.split("\n")
-				.filter(Boolean);
+			remoteChanges = gitChangedPaths(mountRoot, [`${head}...${remoteHead}`]);
 			const lane = await rebaseInLane(mountRoot, head, remoteHead);
 			if (!lane.ok) {
 				const state = writeConflictState(mountRoot, {
@@ -409,17 +403,7 @@ export async function pullRemote(
 			);
 		}
 		const remoteRef = `refs/remotes/origin/${branch}`;
-		// NUL-separated (no quoting of non-ASCII names) and without rename
-		// detection, so both sides of an incoming rename are listed.
-		const remoteChanges = runGitOrThrow(mountRoot, [
-			"diff",
-			"--name-only",
-			"-z",
-			"--no-renames",
-			`HEAD...${remoteRef}`,
-		])
-			.split("\0")
-			.filter(Boolean);
+		const remoteChanges = gitChangedPaths(mountRoot, [`HEAD...${remoteRef}`]);
 		// Checked here, not left to Git: a fast-forward overwrites a tracked
 		// file missing from the working tree, so a drafted (unstaged) deletion
 		// would silently come back with the colleague's content.

@@ -20,7 +20,10 @@
   whose first push failed can still be sent, and review does not block it.
   `pull` checks the drafted files against the incoming ones itself: a record
   deleted in the draft and changed by a colleague no longer comes back
-  silently (Git's fast-forward overwrites a missing tracked file).
+  silently (Git's fast-forward overwrites a missing tracked file). Changed
+  paths (`remoteChanges`, the pull check, the unsent generated check) are read
+  NUL-separated and without rename detection: names with diacritics come back
+  as they are on disk and both sides of a rename are listed.
 
 - **The engine owns the whole publish lifecycle.** `publish` confirms the draft
   revision, validates, materializes, commits and sends. Sending replays onto a

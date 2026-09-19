@@ -314,3 +314,31 @@ describe("pull never undoes a drafted deletion", () => {
 		});
 	}
 });
+
+describe("changed paths are reported as they are named on disk", () => {
+	test("a colleague's record with diacritics is listed raw after a send", async () => {
+		const fixture = createFixtureRepo();
+		try {
+			const db = RepositoryDb.open(fixture.mountPath);
+			writeFixtureDocument(fixture.mountPath, "mine", { name: "Mine" });
+			git(fixture.mountPath, ["add", "--all"]);
+			git(fixture.mountPath, ["commit", "--message", "waiting to be sent"]);
+			const head = git(fixture.mountPath, ["rev-parse", "HEAD"]).trim();
+
+			const second = cloneFixture(fixture);
+			writeFileSync(
+				path.join(second, "data/things/čáp.yaml"),
+				"schemaVersion: thing.v3\nid: cap\nrecord:\n  name: Čáp\n",
+				"utf8",
+			);
+			git(second, ["add", "--all"]);
+			git(second, ["commit", "--quiet", "--message", "colleague"]);
+			git(second, ["push", "--quiet", "origin", fixture.branch]);
+
+			const result = await db.finishSend({ expectedHead: head });
+			expect(result.remoteChanges).toEqual(["data/things/čáp.yaml"]);
+		} finally {
+			rmSync(fixture.root, { recursive: true, force: true });
+		}
+	});
+});

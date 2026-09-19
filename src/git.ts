@@ -238,6 +238,17 @@ export function gitRenameSources(repoRoot: string): Map<string, string> {
 	return sources;
 }
 
+/**
+ * Paths a diff range touches, as they are named on disk: NUL-separated (Git
+ * would quote non-ASCII names otherwise) and without rename detection, so both
+ * sides of a rename are listed.
+ */
+export function gitChangedPaths(repoRoot: string, range: string[]): string[] {
+	return runGitOrThrow(repoRoot, ["diff", "--name-only", "-z", "--no-renames", ...range])
+		.split("\0")
+		.filter(Boolean);
+}
+
 /** Porcelain dirty paths relative to the repo root (staged, unstaged and untracked). */
 export function gitDirtyPaths(repoRoot: string): string[] {
 	return gitStatusEntries(repoRoot, ["--untracked-files=all"]).map(
