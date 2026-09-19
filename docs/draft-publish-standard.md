@@ -185,9 +185,15 @@ the draft revision:
 - a mismatch is refused with `record_changed` and the current revision. Nothing
   is written. `null` means "must not exist yet", so two people creating the same
   record cannot both win;
-- after a successful save the client continues from the returned revision. It
-  never takes a newer revision on its own and re-sends an old whole record with
-  it — overwriting is a decision the person makes on the version that is there.
+- the revision belongs to **one concrete edit**. After a successful save that
+  edit continues from the returned revision — and only that edit: another
+  editor, or the same record opened again later, sends the revision of the
+  content it actually loaded. Nothing takes a newer revision on its own and
+  re-sends an old whole record with it; overwriting is a decision the person
+  makes on the version that is there;
+- a record reopened while an unsaved edit of it is still pending resumes that
+  edit, so there is one owner of that content: it is not lost, and it is not
+  sent later on its own over a newer save.
 
 Saving one record never depends on another record. The draft revision is not
 used for saves: with it, a colleague's change to a different deal would refuse
