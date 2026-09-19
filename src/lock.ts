@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
@@ -23,6 +24,12 @@ interface LockPayload {
 	 * share both, and releasing by pid would remove the successor's lock.
 	 */
 	token?: string;
+	/**
+	 * The OS record of when the holding process started. Same for every thread
+	 * and module copy in one process, different for a new process that got the
+	 * same pid — which is what tells "our own live lock" from "a predecessor".
+	 */
+	processStart?: string;
 }
 
 function lockPath(mountRoot: string): string {
@@ -46,22 +53,60 @@ function readLock(filePath: string): LockPayload | undefined {
 	}
 }
 
-/** Tokens of locks this process currently holds. */
-const heldTokens = new Set<string>();
+/**
+ * The operating system's record of when this process started.
+ *
+ * Read from the OS on purpose: it is the same value from every thread and every
+ * copy of this module in one process, and different for a new process that was
+ * handed the same pid. (`process.uptime()` is not usable here — in a Bun worker
+ * it counts from the worker's start, not the process's.) Undefined where the
+ * platform offers no cheap reading; the caller then errs toward "live".
+ */
+let cachedProcessStart: string | undefined | null = null;
+function ownProcessStart(): string | undefined {
+	if (cachedProcessStart !== null) return cachedProcessStart;
+	cachedProcessStart = undefined;
+	try {
+		if (process.platform === "linux") {
+			// Field 22 of /proc/self/stat, counted after the parenthesised name,
+			// which may itself contain spaces.
+			const stat = readFileSync("/proc/self/stat", "utf8");
+			const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+			cachedProcessStart = fields[19] ? `linux:${fields[19]}` : undefined;
+		} else if (process.platform === "darwin") {
+			const result = spawnSync("ps", ["-o", "lstart=", "-p", String(process.pid)], {
+				encoding: "utf8",
+			});
+			const text = result.stdout?.trim();
+			cachedProcessStart = result.status === 0 && text ? `darwin:${text}` : undefined;
+		}
+	} catch {
+		cachedProcessStart = undefined;
+	}
+	return cachedProcessStart;
+}
+
+/** An unreadable lock newer than this may still be being written by its creator. */
+const UNREADABLE_LOCK_GRACE_MS = 5_000;
 
 /**
  * Is a lock written on this machine abandoned?
  *
  * Liveness is the test, never age: a running holder keeps the gate however long
- * its publish takes. One case needs care — a lock carrying *this* process's pid
- * that this process never issued. That is a previous incarnation which crashed
- * and whose pid was handed to us again, the usual shape of a container
- * restarting under the same hostname. Treating it as live would block every
- * write for good, so it counts as abandoned.
+ * its publish takes. One case needs care — a lock carrying *this* process's pid.
+ * It is ours (from any thread or module copy) if it records our start time, and
+ * a predecessor's if it does not: a process that crashed and whose pid was
+ * handed out again, the usual shape of a container restarting under the same
+ * hostname. Treating that as live would block every write for good.
  */
 function isLocalLockAbandoned(lock: LockPayload): boolean {
 	if (lock.pid === process.pid) {
-		return !(lock.token && heldTokens.has(lock.token));
+		const ours = ownProcessStart();
+		// Without a reading on either side we cannot tell a predecessor from a
+		// sibling thread, so we keep the lock: a wrongly kept lock is recoverable
+		// by hand, a wrongly taken one silently opens the gate.
+		if (!ours || !lock.processStart) return false;
+		return lock.processStart !== ours;
 	}
 	return !isProcessAlive(lock.pid);
 }
@@ -75,6 +120,23 @@ export function acquirePublishLock(mountRoot: string): () => void {
 	mkdirSync(path.dirname(filePath), { recursive: true });
 
 	const existing = existsSync(filePath) ? readLock(filePath) : undefined;
+	if (!existing && existsSync(filePath)) {
+		// Unreadable: empty (a crash between creating and writing it) or corrupt.
+		// Give a creator that is writing it right now a moment, then reclaim —
+		// otherwise it would block every write through the gate forever.
+		let modifiedAt = 0;
+		try {
+			modifiedAt = statSync(filePath).mtimeMs;
+		} catch {
+			/* vanished meanwhile */
+		}
+		if (Date.now() - modifiedAt < UNREADABLE_LOCK_GRACE_MS) {
+			throw new PublishLockedError(
+				`publish lock at ${filePath} is being written; try again in a moment`,
+			);
+		}
+		rmSync(filePath, { force: true });
+	}
 	if (existing) {
 		const sameHost = existing.hostname === os.hostname();
 		const age = Date.now() - Date.parse(existing.acquiredAt);
@@ -100,6 +162,7 @@ export function acquirePublishLock(mountRoot: string): () => void {
 		hostname: os.hostname(),
 		acquiredAt: new Date().toISOString(),
 		token: randomUUID(),
+		processStart: ownProcessStart(),
 	};
 	// "wx" fails when someone else recreated the lock between check and write.
 	try {
@@ -113,10 +176,7 @@ export function acquirePublishLock(mountRoot: string): () => void {
 		);
 	}
 
-	if (payload.token) heldTokens.add(payload.token);
-
 	return () => {
-		if (payload.token) heldTokens.delete(payload.token);
 		const current = readLock(filePath);
 		if (current?.token === payload.token) {
 			rmSync(filePath, { force: true });
@@ -162,4 +222,9 @@ export function withDraftWriteLock<T>(mountRoot: string, write: () => T): T {
 	} finally {
 		release();
 	}
+}
+
+/** Exposed for tests that write a lock "as another copy of this module" would. */
+export function ownProcessStartForTests(): string | undefined {
+	return ownProcessStart();
 }

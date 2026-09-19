@@ -5,10 +5,15 @@
 - A confirmed publish of a draft with a staged rename no longer refuses itself:
   the revision and the pre-staging check hash one path set that does not depend
   on how Git splits a rename, which an autostash apply changes.
-- A lock carrying this process's own pid that it never issued — a crashed
-  previous incarnation, typically after a container restart — is reclaimed,
-  instead of blocking every write for good. The standard lists the remaining
-  pid-reuse and cross-host limits.
+- A lock carrying this process's own pid is told apart from a crashed
+  predecessor's by the OS record of the process start (the same across threads
+  and module copies), so a container restarting with the same pid is not
+  blocked for good and a worker thread's live lock is never taken over. An
+  unreadable lock is reclaimed after a short grace period. The standard lists
+  the remaining pid-reuse and cross-host limits.
+- Record revert availability treats declared artifacts outside `generated/` as
+  generated output, and refuses the deleted side of a staged rename as
+  "renamed" rather than "not part of the draft".
 
 - A lock held by a running process on this machine is never taken over,
   however old it is; only a dead local holder or a lock from another host older

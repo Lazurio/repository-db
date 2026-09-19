@@ -3,6 +3,7 @@ import path from "node:path";
 import { assertDataRepoBoundary } from "./boundary.ts";
 import { activeConflict } from "./conflict.ts";
 import { computeDraftRevision } from "./draftRevision.ts";
+import { isPathDeclared } from "./generated.ts";
 import {
 	gitAheadBehind,
 	gitDirtyPaths,
@@ -137,6 +138,16 @@ function assertRecordRevertSupported(
 	dirtyPaths: readonly string[],
 	renameSources: Map<string, string> = gitRenameSources(mountRoot),
 ): void {
+	// Checked first: the source of a staged rename is shown in review as a
+	// deleted record but is not in Git's dirty list, and "renamed" is the true
+	// reason it cannot be reverted alone — "not part of the draft" would
+	// contradict the row the user is looking at.
+	if (renameSources.has(relativePath) || [...renameSources.values()].includes(relativePath)) {
+		throw new RevertNotSupportedError(
+			"renamed_record",
+			"This record was renamed in the draft. Reverting one side alone would leave the other behind — discard the whole draft instead.",
+		);
+	}
 	if (!dirtyPaths.includes(relativePath)) {
 		throw new RevertNotSupportedError(
 			"not_in_draft",
@@ -145,7 +156,13 @@ function assertRecordRevertSupported(
 	}
 
 	const generatedPrefix = `${config.layout.generated}/`;
-	if (relativePath === config.layout.generated || relativePath.startsWith(generatedPrefix)) {
+	// Generated output is the generated layout plus any declared artifact that
+	// lives elsewhere — both are rebuilt on publish, neither is a record.
+	const isGenerated = (entry: string) =>
+		entry === config.layout.generated ||
+		entry.startsWith(generatedPrefix) ||
+		isPathDeclared(entry, config);
+	if (isGenerated(relativePath)) {
 		throw new RevertNotSupportedError(
 			"generated_artifact",
 			"This is generated output, not a record. It is rebuilt on publish; revert the record it comes from instead.",
@@ -158,9 +175,7 @@ function assertRecordRevertSupported(
 		);
 	}
 
-	const dirtyGenerated = dirtyPaths.filter(
-		(entry) => entry === config.layout.generated || entry.startsWith(generatedPrefix),
-	);
+	const dirtyGenerated = dirtyPaths.filter(isGenerated);
 	if (dirtyGenerated.length > 0) {
 		throw new RevertNotSupportedError(
 			"related_generated_changes",
@@ -168,12 +183,6 @@ function assertRecordRevertSupported(
 		);
 	}
 
-	if (renameSources.has(relativePath) || [...renameSources.values()].includes(relativePath)) {
-		throw new RevertNotSupportedError(
-			"renamed_record",
-			"This record was renamed in the draft. Reverting one side alone would leave the other behind — discard the whole draft instead.",
-		);
-	}
 }
 
 /**

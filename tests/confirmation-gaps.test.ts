@@ -713,12 +713,13 @@ describe("round 3 — a live local lock is never taken over by age", () => {
 		const fixture = createFixtureRepo();
 		try {
 			// The container-restart shape: same hostname, the new app got the same
-			// pid, and the lock carries a token this process never issued.
+			// pid, but the lock records a different process start.
 			writeLock(fixture.mountPath, {
 				pid: process.pid,
 				hostname: os.hostname(),
 				acquiredAt: new Date().toISOString(),
 				token: "previous-incarnation",
+				processStart: "darwin:Thu Jan  1 00:00:00 1970",
 			});
 			const release = acquirePublishLock(fixture.mountPath);
 			release();
@@ -830,6 +831,137 @@ describe("round 3 — a confirmed publish of a staged rename does not refuse its
 				skipValidate: true,
 			});
 			expect(result.state).toBe("published");
+		} finally {
+			rmSync(fixture.root, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("round 3 — ownership of an own-pid lock survives threads and module copies", () => {
+	test("a worker thread holding the lock keeps the main thread out", async () => {
+		const { Worker } = await import("node:worker_threads");
+		const fixture = createFixtureRepo();
+		const lockModule = path.join(import.meta.dir, "../src/lock.ts");
+		const worker = new Worker(
+			[
+				`const { acquirePublishLock } = await import(${JSON.stringify(lockModule)});`,
+				`const { parentPort } = await import("node:worker_threads");`,
+				`const release = acquirePublishLock(${JSON.stringify(fixture.mountPath)});`,
+				`parentPort.postMessage("held");`,
+				`parentPort.once("message", () => { release(); parentPort.postMessage("released"); });`,
+			].join("\n"),
+			{ eval: true, type: "module" } as never,
+		);
+		try {
+			await new Promise<void>((resolve, reject) => {
+				worker.once("message", () => resolve());
+				worker.once("error", reject);
+			});
+			// Same pid, different module state — still recognised as live.
+			expect(() => withDraftWriteLock(fixture.mountPath, () => undefined)).toThrow(
+				/publish or discard is in progress/,
+			);
+			worker.postMessage("release");
+			await new Promise<void>((resolve) => worker.once("message", () => resolve()));
+			// Once the worker lets go, the gate opens.
+			withDraftWriteLock(fixture.mountPath, () => undefined);
+		} finally {
+			await worker.terminate();
+			rmSync(fixture.root, { recursive: true, force: true });
+		}
+	});
+
+	test("a lock with our pid and our start time is ours, whatever wrote it", async () => {
+		const os = await import("node:os");
+		const fixture = createFixtureRepo();
+		try {
+			// As another copy of this module in the same process would write it.
+			const lockFile = path.join(fixture.mountPath, ".repository-db", "publish.lock");
+			mkdirSync(path.dirname(lockFile), { recursive: true });
+			writeFileSync(
+				lockFile,
+				JSON.stringify({
+					pid: process.pid,
+					hostname: os.hostname(),
+					acquiredAt: new Date().toISOString(),
+					token: "other-module-copy",
+					processStart: (await import("../src/lock.ts")).ownProcessStartForTests(),
+				}),
+				"utf8",
+			);
+			expect(() => acquirePublishLock(fixture.mountPath)).toThrow(/already running/);
+		} finally {
+			rmSync(fixture.root, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("round 3 — an unreadable lock is never a permanent block", () => {
+	test("a fresh empty lock waits; an old one is reclaimed", async () => {
+		const { utimesSync } = await import("node:fs");
+		const fixture = createFixtureRepo();
+		try {
+			const lockFile = path.join(fixture.mountPath, ".repository-db", "publish.lock");
+			mkdirSync(path.dirname(lockFile), { recursive: true });
+			writeFileSync(lockFile, "", "utf8");
+			// Possibly still being written by its creator.
+			expect(() => acquirePublishLock(fixture.mountPath)).toThrow(/being written/);
+
+			// Left behind by a crash between creating and writing it.
+			const past = new Date(Date.now() - 60_000);
+			utimesSync(lockFile, past, past);
+			const release = acquirePublishLock(fixture.mountPath);
+			release();
+			expect(existsSync(lockFile)).toBe(false);
+		} finally {
+			rmSync(fixture.root, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("round 3 — revert availability agrees with what review shows", () => {
+	test("a declared artifact outside generated/ is not a record, and blocks record reverts", () => {
+		const fixture = createFixtureRepo();
+		try {
+			writeFileSync(
+				path.join(fixture.mountPath, "repository-db.yaml"),
+				[
+					"schema_version: repository-db.config.v1",
+					"app: fixture",
+					`data_repo: {remote: ${fixture.originPath}, branch: ${fixture.branch}}`,
+					"schema: {name: fixture-data, version: 3.0.0-alpha.0}",
+					"layout: {data: data, generated: generated, scripts: scripts}",
+					"generated_manifest:",
+					"  - path: data/rollups/count.txt",
+					"validate: []",
+					"",
+				].join("\n"),
+				"utf8",
+			);
+			writeFixtureDocument(fixture.mountPath, "record", { name: "Published" });
+			publishBaseline(fixture);
+
+			const db = RepositoryDb.open(fixture.mountPath);
+			writeFixtureDocument(fixture.mountPath, "record", { name: "Edited" });
+			mkdirSync(path.join(fixture.mountPath, "data/rollups"), { recursive: true });
+			writeFileSync(path.join(fixture.mountPath, "data/rollups/count.txt"), "2\n", "utf8");
+
+			expect(db.canRevertRecord("data/rollups/count.txt").reason).toContain("generated output");
+			expect(db.canRevertRecord("data/things/record.yaml").reason).toContain("generated data");
+		} finally {
+			rmSync(fixture.root, { recursive: true, force: true });
+		}
+	});
+
+	test("the deleted side of a staged rename is refused as renamed", () => {
+		const fixture = createFixtureRepo();
+		try {
+			writeFixtureDocument(fixture.mountPath, "old-name", { name: "Published" });
+			publishBaseline(fixture);
+			git(fixture.mountPath, ["mv", "data/things/old-name.yaml", "data/things/new-name.yaml"]);
+
+			const db = RepositoryDb.open(fixture.mountPath);
+			expect(db.canRevertRecord("data/things/old-name.yaml").reason).toContain("renamed");
 		} finally {
 			rmSync(fixture.root, { recursive: true, force: true });
 		}

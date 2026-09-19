@@ -170,9 +170,11 @@ waiting would stall the very operation the write is waiting for.
 
 A lock is taken over only when its holder is provably gone. On the same machine
 that means the holding process is no longer running; a running holder keeps the
-gate however long it takes. A lock that carries this process's own pid but was
-never issued by it — a crashed previous incarnation whose pid came back, as when
-a container restarts — counts as abandoned.
+gate however long it takes. A lock that carries this process's own pid is ours
+if it records this process's start as the operating system reports it — the
+same from every thread and module copy — and a crashed predecessor's otherwise,
+as when a container restarts and hands out the same pid. Where the platform
+gives no such reading (Windows), an own-pid lock is kept rather than guessed at.
 
 Two limits remain, stated rather than hidden:
 
@@ -182,7 +184,8 @@ Two limits remain, stated rather than hidden:
 - a lock left by a crashed process whose pid was later reused by a **different,
   unrelated** local process looks live and stays until removed by hand — the
   error names the lock file and says to remove it only once that process is
-  known to be gone.
+  known to be gone. An unreadable (empty or corrupt) lock is reclaimed after a
+  few seconds, so it never becomes such a dead end.
 
 The pilot runs each data checkout on a single machine, where the first does not
 arise and the second needs an unlikely coincidence.
