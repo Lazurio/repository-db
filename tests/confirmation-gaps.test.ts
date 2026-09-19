@@ -1070,3 +1070,42 @@ describe("round 3 — upgrade and concurrency around reclaiming", () => {
 		}
 	});
 });
+
+describe("round 3 — finish-send never makes a commit of its own", () => {
+	test("a legacy tracked lock does not turn finishing into a new commit", async () => {
+		const os = await import("node:os");
+		const fixture = createFixtureRepo();
+		try {
+			// A data repo from an older engine that tracked the runtime lock.
+			writeFileSync(path.join(fixture.mountPath, ".gitignore"), "", "utf8");
+			const lockFile = path.join(fixture.mountPath, ".repository-db", "publish.lock");
+			mkdirSync(path.dirname(lockFile), { recursive: true });
+			writeFileSync(
+				lockFile,
+				JSON.stringify({ pid: 2_147_483_000, hostname: os.hostname(), acquiredAt: new Date(0).toISOString() }),
+				"utf8",
+			);
+			publishBaseline(fixture);
+			rmSync(lockFile);
+
+			const db = RepositoryDb.open(fixture.mountPath);
+			writeFixtureDocument(fixture.mountPath, "reviewed", { name: "Unsent" });
+			git(fixture.mountPath, ["add", "data"]);
+			git(fixture.mountPath, ["commit", "--message", "publish that failed to push"]);
+			const pendingHead = git(fixture.mountPath, ["rev-parse", "HEAD"]).trim();
+
+			const result = await db.publish({
+				actor: ACTOR,
+				source: "test",
+				finishSendOnly: true,
+				expectedHead: pendingHead,
+				skipValidate: true,
+			});
+			expect(result.state).toBe("published");
+			expect(git(fixture.originPath, ["rev-parse", fixture.branch]).trim()).toBe(pendingHead);
+			expect(git(fixture.mountPath, ["rev-parse", "HEAD"]).trim()).toBe(pendingHead);
+		} finally {
+			rmSync(fixture.root, { recursive: true, force: true });
+		}
+	});
+});

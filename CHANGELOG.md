@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Finishing a send skips the legacy-lock repair as well and refuses, rather
+  than making a commit, if anything dirtied the tree after its first check.
+  The card keys field rows by path, since labels repeat across nested fields.
+
 - Finishing a send checks for draft changes first and runs neither validation
   nor materializers, so a materializer that is not byte-identical on every run
   can no longer make it refuse itself or add a commit.

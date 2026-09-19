@@ -48,6 +48,8 @@ export interface DraftPanelInput {
 }
 
 export interface DraftPanelFieldRow {
+	/** Stable identity of the row; labels repeat across nested fields. */
+	fieldPath: string;
 	label: string;
 	before: string;
 	after: string;
@@ -140,6 +142,7 @@ function recordOf(input: DraftPanelRecordInput): DraftPanelRecord {
 		href: input.resource.routeTarget?.href,
 		openLabel: input.resource.routeTarget?.label ?? "Otevřít",
 		fields: (change?.fields ?? []).map((field) => ({
+			fieldPath: field.fieldPath,
 			label: field.label,
 			before: field.beforeSummary ?? "—",
 			after: field.afterSummary ?? "—",

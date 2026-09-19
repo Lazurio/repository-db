@@ -58,7 +58,9 @@ describe("draft panel model", () => {
 		expect(record?.label).toBe("ANTANA Group — partnerský distribuční kanál");
 		expect(record?.typeLabel).toBe("Deal");
 		expect(record?.changeLabel).toBe("Upraveno");
-		expect(record?.fields).toEqual([{ label: "Stav", before: "Zájem", after: "Cenová nabídka" }]);
+		expect(record?.fields).toEqual([
+			{ fieldPath: "/record/status", label: "Stav", before: "Zájem", after: "Cenová nabídka" },
+		]);
 		expect(record?.href).toBe("#all?deal=deal-1");
 		// The path is kept, but only as technical detail.
 		expect(record?.technicalPath).toBe("data/deals/deal-1.yaml");

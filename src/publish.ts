@@ -270,7 +270,11 @@ export async function publish(
 			}
 		}
 
-		stageTrackedPublishLockCleanup(mountRoot);
+		// The legacy-lock repair rewrites .gitignore and the index; finishing a
+		// send must not change anything, so it is skipped there too.
+		if (!options.finishSendOnly) {
+			stageTrackedPublishLockCleanup(mountRoot);
+		}
 		// Captured after publish's own repair step and before validate and
 		// materialize, because those run configured commands that take time.
 		// Generated output is excluded: materialize rewrites it by design, so
@@ -290,6 +294,14 @@ export async function publish(
 		const dirtyPaths = gitDirtyPaths(mountRoot).filter(
 			(entry) => !entry.startsWith(`${ENGINE_DIR}/`),
 		);
+		// Backstop: whatever dirtied the tree since the first check, a finish-send
+		// never falls through into making a commit of its own.
+		if (options.finishSendOnly && dirtyPaths.length > 0) {
+			throw new RepositoryDbError(
+				"new_draft_present",
+				"There are draft changes beyond the commit waiting to be sent. Finishing the send would publish them unreviewed; review the draft and publish it explicitly instead.",
+			);
+		}
 		if (dirtyPaths.length === 0) {
 			// Recovery path: a previous publish committed but could not push
 			// (or a conflict was resolved into a local commit). Just push.
