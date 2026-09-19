@@ -89,8 +89,10 @@ export function activeConflict(mountRoot: string): ConflictState | undefined {
 			gitState: `unmerged: ${unmerged.join(", ")}`,
 			message: "the data repository has unresolved merge conflicts",
 			handoff:
+				// Abort only undoes what repository-db itself started; these
+				// markers come from elsewhere, so resolving them is the way out.
 				"Resolve the conflict markers, `git add` the files, then run " +
-				"`repository-db conflict --resolved`, or restore via `repository-db conflict --abort`.",
+				"`repository-db conflict --resolved`.",
 		};
 	}
 	return undefined;
@@ -105,93 +107,60 @@ export function assertNoActiveConflict(mountRoot: string): void {
 	}
 }
 
-const COMMIT_SHA_RE = /^[0-9a-f]{7,40}$/;
-
 /**
- * Find the current stash ref of the recorded autostash by commit SHA. The
- * stash index can shift if the user stashes manually during the conflict, so
- * a positional `stash@{0}` lookup is not reliable.
- */
-function findStashRefBySha(mountRoot: string, sha: string): string | undefined {
-	const result = runGit(mountRoot, ["stash", "list", "--format=%H %gd"]);
-	if (result.status !== 0) return undefined;
-	for (const line of result.stdout.split("\n")) {
-		const [entrySha, ref] = line.trim().split(/\s+/);
-		if (entrySha && ref && entrySha.startsWith(sha)) return ref;
-	}
-	return undefined;
-}
-
-/** Exact-subject fallback when no autostash SHA was recorded. */
-function topAutostashRef(mountRoot: string): string | undefined {
-	const result = runGit(mountRoot, ["stash", "list", "--format=%gd %gs"]);
-	if (result.status !== 0) return undefined;
-	const first = (result.stdout.split("\n")[0] ?? "").trim();
-	const [ref, ...subject] = first.split(/\s+/);
-	// Git names the rebase autostash entry exactly "autostash"; a user stash
-	// ("WIP on …", "On …: message") must never be popped by abort.
-	return ref && subject.join(" ") === "autostash" ? ref : undefined;
-}
-
-/** Commit SHA of the autostash entry (subject exactly "autostash"), if any. */
-export function currentAutostashSha(mountRoot: string): string | undefined {
-	const result = runGit(mountRoot, ["stash", "list", "--format=%H %gs"]);
-	if (result.status !== 0) return undefined;
-	for (const line of result.stdout.split("\n")) {
-		const [sha, ...subject] = line.trim().split(/\s+/);
-		if (sha && subject.join(" ") === "autostash") return sha;
-	}
-	return undefined;
-}
-
-/**
- * Abort the failed operation and restore the safest pre-publish state:
+ * Leave the conflict and return to a state the user can act on.
  *
- * - mid-rebase/merge: `git rebase --abort` / `git merge --abort` (git also
- *   restores the autostash automatically),
- * - completed pull with a conflicted autostash apply (git exits 0 but leaves
- *   unmerged paths): reset to the recorded pre-operation HEAD and re-apply
- *   the recorded autostash so the local draft is back in the working tree.
+ * - A git rebase/merge in progress (started by hand or by an older engine) is
+ *   aborted; Git restores what it held.
+ * - A conflict the engine recorded while sending means local commits could
+ *   not be replayed onto the remote. Those commits return to the draft
+ *   (`reset --mixed` to where they branched off): nothing is lost, the files
+ *   stay exactly as they are. The way on is to revert the conflicting
+ *   records, pull the colleague's changes and redo the edit on top: pull is
+ *   fast-forward only, so an adjusted record would conflict again.
  */
-export function abortConflict(mountRoot: string): void {
+export function abortConflict(mountRoot: string, branch: string): void {
+	if (typeof branch !== "string" || !branch.trim()) {
+		// Without the branch the unsent commits cannot be found, and clearing the
+		// record anyway would unblock writes while they stay committed.
+		throw new RepositoryDbError(
+			"invalid_args",
+			"abortConflict needs the data branch (use RepositoryDb.abortConflict())",
+		);
+	}
 	const operation = gitOperationInProgress(mountRoot);
 	if (operation === "rebase-merge" || operation === "rebase-apply") {
 		runGitOrThrow(mountRoot, ["rebase", "--abort"]);
 	} else if (operation === "merge") {
 		runGitOrThrow(mountRoot, ["merge", "--abort"]);
-	} else if (gitUnmergedPaths(mountRoot).length > 0) {
-		const recorded = readConflictState(mountRoot);
-		const target = recorded?.preOperationHead;
-		// conflict.json is local and gitignored, but never feed an unvalidated
-		// value into `reset --hard`: a tampered file must fail loudly instead
-		// of silently rewinding the branch.
-		if (target !== undefined && !COMMIT_SHA_RE.test(target)) {
-			throw new RepositoryDbError(
-				"invalid_conflict_state",
-				`recorded preOperationHead has unexpected format (${target}); inspect ${conflictPath(mountRoot)} manually`,
-			);
-		}
-		runGitOrThrow(mountRoot, ["reset", "--hard", target ?? "HEAD"]);
-
-		const stashRef = recorded?.autostashSha
-			? findStashRefBySha(mountRoot, recorded.autostashSha)
-			: topAutostashRef(mountRoot);
-		if (stashRef) {
-			const pop = runGit(mountRoot, ["stash", "pop", stashRef]);
-			if (pop.status !== 0) {
-				throw new RepositoryDbError(
-					"abort_incomplete",
-					"conflict aborted, but the local draft could not be restored from the autostash; " +
-						`it remains available via 'git stash' in ${mountRoot}: ${pop.stderr.trim()}`,
-				);
-			}
-		} else if (recorded?.autostashSha) {
+	}
+	const unmerged = gitUnmergedPaths(mountRoot);
+	if (unmerged.length > 0) {
+		// An engine before the send lane recorded conflicted autostash applies;
+		// this version no longer restores them, so it says how to by hand.
+		const legacy = readConflictState(mountRoot) as
+			| (ConflictState & { preOperationHead?: string; autostashSha?: string })
+			| undefined;
+		if (legacy?.autostashSha) {
 			throw new RepositoryDbError(
 				"abort_incomplete",
-				`conflict aborted, but the recorded autostash ${recorded.autostashSha} was not found in 'git stash list'; ` +
-					`inspect the stash in ${mountRoot} manually`,
+				`this conflict was recorded by an older repository-db, which set the draft aside in a stash. To undo it: git reset --hard ${legacy.preOperationHead ?? "<the commit before the publish>"} && git stash apply ${legacy.autostashSha}, then run conflict --resolved`,
 			);
 		}
+		throw new RepositoryDbError(
+			"abort_incomplete",
+			`unresolved conflict markers remain that repository-db did not create (${unmerged.join(", ")}); resolve them by hand, then run conflict --resolved`,
+		);
+	}
+	if (readConflictState(mountRoot)) {
+		const base = runGit(mountRoot, ["merge-base", "HEAD", `refs/remotes/origin/${branch}`]).stdout.trim();
+		if (!base) {
+			throw new RepositoryDbError(
+				"abort_incomplete",
+				`cannot find where the unsent commits branched off origin/${branch}; the conflict stays recorded — inspect ${mountRoot} by hand`,
+			);
+		}
+		runGitOrThrow(mountRoot, ["reset", "--mixed", "--quiet", base]);
 	}
 	rmSync(conflictPath(mountRoot), { force: true });
 }

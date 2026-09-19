@@ -40,6 +40,20 @@ export function isPathDeclared(
 }
 
 /**
+ * A generated-layout path the manifest does not declare. The one exception is
+ * the empty placeholder `init` commits so the directory exists; it is not
+ * output and never needs declaring.
+ */
+export function isUndeclaredGenerated(relativePath: string, config: RepositoryDbConfig): boolean {
+	const generatedPrefix = `${config.layout.generated}/`;
+	return (
+		relativePath.startsWith(generatedPrefix) &&
+		relativePath !== `${generatedPrefix}.gitkeep` &&
+		!isPathDeclared(relativePath, config)
+	);
+}
+
+/**
  * Return dirty generated paths that are not declared in the manifest.
  * Publish refuses to continue while any exist.
  */
@@ -47,11 +61,9 @@ export function undeclaredGeneratedDiffs(
 	mountRoot: string,
 	config: RepositoryDbConfig,
 ): string[] {
-	const generatedPrefix = `${config.layout.generated}/`;
 	return gitDirtyPaths(mountRoot)
-		.filter((entry) => entry.startsWith(generatedPrefix))
 		.filter((entry) => !entry.startsWith(`${ENGINE_DIR}/`))
-		.filter((entry) => !isPathDeclared(entry, config));
+		.filter((entry) => isUndeclaredGenerated(entry, config));
 }
 
 export function assertDeclaredGeneratedOnly(

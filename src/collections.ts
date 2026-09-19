@@ -1,13 +1,17 @@
+import { createHash } from "node:crypto";
 import {
 	existsSync,
+	readFileSync,
 	readdirSync,
 	rmSync,
 } from "node:fs";
 import path from "node:path";
 import { assertNoActiveConflict } from "./conflict.ts";
+import { withDraftWriteLock } from "./lock.ts";
 import { readYamlFile, writeYamlFileAtomic } from "./yamlIo.ts";
 import {
 	type DocumentParser,
+	RecordChangedError,
 	type RepositoryDbConfig,
 	RepositoryDbError,
 } from "./types.ts";
@@ -31,6 +35,82 @@ export interface CollectionOptions<T> {
 	parser?: DocumentParser<T>;
 	/** Optional subdirectory below the data layout dir (defaults to the collection name). */
 	directory?: string;
+}
+
+/**
+ * Revision of one stored record: a hash of its file exactly as stored, or
+ * `null` when the record does not exist.
+ *
+ * A client keeps the revision of the version it started editing and hands it
+ * back with the save; the write runs only if the record is still that version.
+ * It is per record on purpose: saving one deal never waits on, or fails
+ * because of, a change to another. The draft revision answers a different
+ * question — which whole draft a publish confirms.
+ */
+export function recordRevision(filePath: string): string | null {
+	let bytes: Buffer;
+	try {
+		bytes = readFileSync(filePath);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+		throw error;
+	}
+	return recordRevisionFromBytes(bytes);
+}
+
+/**
+ * The same revision for bytes the caller already read. A host that parses a
+ * record and hands out its revision must take both from one read; reading the
+ * file twice could pair old content with a newer revision.
+ */
+export function recordRevisionFromBytes(bytes: Uint8Array): string {
+	return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+}
+
+export interface RecordWriteOptions {
+	/**
+	 * Revision of the stored record this write was derived from, `null` when
+	 * the record must not exist yet. Omitted only by a writer that has no
+	 * displayed version to hold the write to, such as an agent script.
+	 */
+	baseRevision?: string | null;
+}
+
+/**
+ * The one way a draft record gets written: through the shared gate, refused
+ * during a conflict, and — when the caller names the version it started from —
+ * only if the record is still that version. Check and write happen under the
+ * same gate, so no other supported write can slip in between.
+ *
+ * For layouts a {@link Collection} does not describe, a host passes the file
+ * and does the write itself inside `write`.
+ */
+export function writeRecordDraft<T>(
+	mountRoot: string,
+	filePath: string,
+	options: RecordWriteOptions,
+	write: () => T,
+): T {
+	assertNoActiveConflict(mountRoot);
+	return withDraftWriteLock(mountRoot, () => {
+		// Re-checked under the gate: a publish can record a conflict and
+		// release the lock between the check above and this write.
+		assertNoActiveConflict(mountRoot);
+		if (options.baseRevision !== undefined) {
+			const current = recordRevision(filePath);
+			if (current !== options.baseRevision) {
+				throw new RecordChangedError(
+					current === null
+						? `${path.basename(filePath)} no longer exists; it was deleted or reverted since it was read.`
+						: options.baseRevision === null
+							? `${path.basename(filePath)} already exists; it was created by someone else in the meantime.`
+							: `${path.basename(filePath)} was saved by someone else since it was read.`,
+					current,
+				);
+			}
+		}
+		return write();
+	});
 }
 
 export function documentFileName(id: string): string {
@@ -100,12 +180,23 @@ export class Collection<T> {
 		return this.listIds().map((id) => this.getOrThrow(id));
 	}
 
+	/** Revision of one document as stored, `null` when it does not exist. */
+	revision(id: string): string | null {
+		return recordRevision(path.join(this.directory, documentFileName(id)));
+	}
+
 	/**
 	 * Write a document as a local draft (working-tree change, no commit).
-	 * Refused while a conflict state is active.
+	 * Refused while a conflict state is active, and — with a base revision —
+	 * when the stored document is no longer that version. Returns the new
+	 * revision.
 	 */
-	put(id: string, record: T, extraEnvelope: Record<string, unknown> = {}): void {
-		assertNoActiveConflict(this.mountRoot);
+	put(
+		id: string,
+		record: T,
+		extraEnvelope: Record<string, unknown> = {},
+		options: RecordWriteOptions = {},
+	): string {
 		const parsed = this.options.parser ? this.options.parser.parse(record) : record;
 		const envelope: CollectionDocument<T> = {
 			...extraEnvelope,
@@ -113,16 +204,21 @@ export class Collection<T> {
 			id,
 			record: parsed,
 		};
-		writeYamlFileAtomic(path.join(this.directory, documentFileName(id)), envelope);
+		const filePath = path.join(this.directory, documentFileName(id));
+		return writeRecordDraft(this.mountRoot, filePath, options, () => {
+			writeYamlFileAtomic(filePath, envelope);
+			return recordRevision(filePath) as string;
+		});
 	}
 
-	/** Delete a document as a local draft change. */
-	remove(id: string): boolean {
-		assertNoActiveConflict(this.mountRoot);
+	/** Delete a document as a local draft change, under the same rules as put. */
+	remove(id: string, options: RecordWriteOptions = {}): boolean {
 		const filePath = path.join(this.directory, documentFileName(id));
-		if (!existsSync(filePath)) return false;
-		rmSync(filePath);
-		return true;
+		return writeRecordDraft(this.mountRoot, filePath, options, () => {
+			if (!existsSync(filePath)) return false;
+			rmSync(filePath);
+			return true;
+		});
 	}
 
 	private parseEnvelope(raw: unknown, id: string): CollectionDocument<T> {

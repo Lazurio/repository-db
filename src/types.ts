@@ -188,6 +188,27 @@ export interface ReviewFieldSummary {
 	uiAnchor?: ReviewUiAnchor;
 }
 
+/**
+ * Where a draft change came from, as far as the engine can tell: written in the
+ * app, written by an agent, or not reliably known.
+ *
+ * Information only. Provenance never gates an operation, never decides whether
+ * a discard is safe and is never the audit record — that remains the publish
+ * commit and its trailers. When in doubt the answer is `unknown`, and the UI
+ * says so plainly rather than guessing at an author.
+ */
+export type ReviewChangeOriginKind = "app" | "agent" | "unknown";
+
+export interface ReviewChangeOrigin {
+	kind: ReviewChangeOriginKind;
+	/** Identity of the writer, in the same format as the publish actor. */
+	actor?: string;
+	/** Producing surface, e.g. `deals-v3` or `repository-db-cli`. */
+	source?: string;
+	/** ISO timestamp when the hint was recorded. */
+	recordedAt?: string;
+}
+
 export interface ResourceChange {
 	/** Stable within one draft/review computation; shared by panels, rows and publish readiness. */
 	changeId: string;
@@ -202,6 +223,8 @@ export interface ResourceChange {
 	draftContentHash?: string;
 	/** Source technical refs for generated outputs, when known. */
 	generatedFrom?: ReviewTechnicalReference[];
+	/** Informational provenance; never gates an operation. */
+	origin?: ReviewChangeOrigin;
 }
 
 export type ReviewInputChangeKind = ResourceChangeKind | "renamed";
@@ -220,8 +243,19 @@ export interface ReviewInputChange {
 	draftContentHash?: string;
 	/** Hash of the baseline file/content when available. */
 	baselineContentHash?: string;
+	/**
+	 * Baseline file content, when the engine already read it.
+	 *
+	 * An app adapter has to diff against the published version, and the engine
+	 * reads that same content to hash it — handing it over saves a second
+	 * `git show` per record, which is the difference between a snappy review and
+	 * a stalled request on a large draft.
+	 */
+	baselineText?: string;
 	/** Source technical refs for generated outputs, when known. */
 	generatedFrom?: ReviewTechnicalReference[];
+	/** Informational provenance; never gates an operation. */
+	origin?: ReviewChangeOrigin;
 	/** Non-secret JSON metadata for diagnostics; not a UI label. */
 	metadata?: JsonObject;
 }
@@ -358,6 +392,16 @@ export interface ReviewableResource {
 export interface ReviewSurfaceSnapshot {
 	reviewContractVersion: string;
 	baselineHead: string;
+	/**
+	 * Revision of the draft these resources describe.
+	 *
+	 * Computed as part of the same review, so a confirmation carrying it applies
+	 * to exactly what was shown. Reading it separately after a review would
+	 * reintroduce the gap it exists to close.
+	 */
+	draftRevision?: string;
+	/** HEAD at review time; used to finish sending exactly this commit. */
+	head?: string;
 	computedAt?: string;
 	/** Raw input changes used to compute the resource representation, if retained. */
 	inputChanges?: ReviewInputChange[];
@@ -405,6 +449,12 @@ export interface CommitTrailers {
 export interface PublishOptions {
 	/** Human actor recorded in the commit trailers, e.g. `Jana <jana@firma.cz>`. */
 	actor: string;
+	/**
+	 * Revision of the draft being confirmed. Publish runs only if the draft is
+	 * still exactly that version when the shared gate is taken. A caller with
+	 * nothing displayed confirms what is there by passing `draftRevision()`.
+	 */
+	expectedRevision: string;
 	/** Producing surface, e.g. `sample-app-v1` or `repository-db-cli`. */
 	source: string;
 	/** Optional human summary used as the first commit-message line. */
@@ -417,12 +467,25 @@ export interface PublishOptions {
 	skipMaterialize?: boolean;
 }
 
+export interface FinishSendOptions {
+	/**
+	 * The commit waiting to be sent, as it was shown. Finishing a send pushes
+	 * exactly the commits up to this one and never makes a new commit.
+	 */
+	expectedHead: string;
+}
+
 export interface PublishResult {
 	/** `published` on success. */
 	state: "published" | "nothing_to_publish";
 	commit?: string;
 	changeId?: string;
 	pushedTo?: string;
+	/**
+	 * Paths a colleague had published in the meantime that this send
+	 * integrated under the local work. Empty when the remote had not moved.
+	 */
+	remoteChanges?: string[];
 }
 
 export interface ConflictState {
@@ -432,10 +495,8 @@ export interface ConflictState {
 	gitState: string;
 	message: string;
 	handoff: string;
-	/** HEAD commit before the failed operation; used by safe abort/recovery. */
-	preOperationHead?: string;
-	/** Commit of the autostash holding the local draft, when one exists. */
-	autostashSha?: string;
+	/** Files both sides changed, when the engine knows them. */
+	paths?: string[];
 }
 
 export class RepositoryDbError extends Error {
@@ -459,6 +520,21 @@ export class ConflictActiveError extends RepositoryDbError {
 	constructor(message: string) {
 		super("conflict_active", message);
 		this.name = "ConflictActiveError";
+	}
+}
+
+/**
+ * A record write whose base revision is no longer what is stored: someone saved
+ * the same record in the meantime. The write was not applied.
+ */
+export class RecordChangedError extends RepositoryDbError {
+	/** Revision stored now; `null` when the record no longer exists. */
+	readonly currentRevision: string | null;
+
+	constructor(message: string, currentRevision: string | null) {
+		super("record_changed", message);
+		this.name = "RecordChangedError";
+		this.currentRevision = currentRevision;
 	}
 }
 

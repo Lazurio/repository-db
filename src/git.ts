@@ -205,6 +205,50 @@ function gitStatusEntries(repoRoot: string, extraArgs: string[]): Array<[string,
 	return entries;
 }
 
+/**
+ * Staged rename/copy sources, keyed by their new path.
+ *
+ * `git status -z` reports `R`/`C` entries as `<new>\0<old>`, and
+ * {@link gitDirtyPaths} intentionally surfaces only the new path. A caller that
+ * has to return a renamed record to its published state needs the old path too,
+ * otherwise the source stays staged as deleted.
+ */
+export function gitRenameSources(repoRoot: string): Map<string, string> {
+	const output = runGitOrThrow(repoRoot, [
+		"status",
+		"--porcelain=v1",
+		"-z",
+		// Explicit, so the guard does not depend on the user's status.renames.
+		"--renames",
+		"--untracked-files=all",
+	]);
+	const tokens = output.split("\0").filter((token) => token.length > 0);
+	const sources = new Map<string, string>();
+	for (let index = 0; index < tokens.length; index += 1) {
+		const token = tokens[index] ?? "";
+		if (token.length < 4) continue;
+		const xy = token.slice(0, 2);
+		const newPath = token.slice(3);
+		if (xy.includes("R") || xy.includes("C")) {
+			const oldPath = tokens[index + 1];
+			if (oldPath) sources.set(newPath, oldPath);
+			index += 1;
+		}
+	}
+	return sources;
+}
+
+/**
+ * Paths a diff range touches, as they are named on disk: NUL-separated (Git
+ * would quote non-ASCII names otherwise) and without rename detection, so both
+ * sides of a rename are listed.
+ */
+export function gitChangedPaths(repoRoot: string, range: string[]): string[] {
+	return runGitOrThrow(repoRoot, ["diff", "--name-only", "-z", "--no-renames", ...range])
+		.split("\0")
+		.filter(Boolean);
+}
+
 /** Porcelain dirty paths relative to the repo root (staged, unstaged and untracked). */
 export function gitDirtyPaths(repoRoot: string): string[] {
 	return gitStatusEntries(repoRoot, ["--untracked-files=all"]).map(
@@ -225,8 +269,10 @@ export function gitAheadBehind(repoRoot: string, branch: string): AheadBehind {
 		`${branch}...origin/${branch}`,
 	]);
 	if (result.status !== 0) {
-		// No upstream yet (fresh data repo before the first push).
-		return { ahead: 0, behind: 0 };
+		// No upstream yet (fresh data repo before the first push): every local
+		// commit is still unsent.
+		const local = runGit(repoRoot, ["rev-list", "--count", branch]);
+		return { ahead: local.status === 0 ? Number(local.stdout.trim()) || 0 : 0, behind: 0 };
 	}
 	const [ahead = "0", behind = "0"] = result.stdout.trim().split(/\s+/);
 	return { ahead: Number(ahead) || 0, behind: Number(behind) || 0 };
@@ -262,6 +308,75 @@ export async function gitFetchAsync(
 		timeoutMs,
 		gitBin: options.gitBin,
 	});
+}
+
+/**
+ * Read many blobs from one commit in a single git process.
+ *
+ * A review reads the published version of every changed record. Doing that with
+ * one `git show` per record is one subprocess per record — fine for three
+ * changes, a stalled request for a bulk agent edit. `cat-file --batch` answers
+ * the whole list from one process instead.
+ *
+ * Returns a map keyed by the requested path; a path absent from the commit maps
+ * to `undefined`, which is how a newly created record looks.
+ */
+export function gitBatchShow(
+	repoRoot: string,
+	ref: string,
+	relativePaths: readonly string[],
+): Map<string, string | undefined> {
+	const result = new Map<string, string | undefined>();
+	if (relativePaths.length === 0) return result;
+
+	// The batch protocol is newline-delimited. A path containing a newline would
+	// shift every following answer onto the wrong path, so such a set is read
+	// one blob at a time instead — rare, and correct beats fast.
+	if (relativePaths.some((entry) => entry.includes("\n"))) {
+		for (const relativePath of relativePaths) {
+			const single = runGit(repoRoot, ["show", `${ref}:${relativePath}`]);
+			result.set(relativePath, single.status === 0 ? single.stdout : undefined);
+		}
+		return result;
+	}
+
+	const request = spawnSync("git", ["-C", repoRoot, "cat-file", "--batch"], {
+		input: `${relativePaths.map((entry) => `${ref}:${entry}`).join("\n")}\n`,
+		maxBuffer: 256 * 1024 * 1024,
+		env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+	});
+	if (request.error) {
+		throw new RepositoryDbError(
+			"git_unavailable",
+			`git could not be executed: ${request.error.message}`,
+		);
+	}
+	const stdout: Buffer = request.stdout ?? Buffer.alloc(0);
+
+	// Responses come back in request order: either "<oid> <type> <size>\n<bytes>\n"
+	// or "<object> missing\n".
+	let cursor = 0;
+	for (const relativePath of relativePaths) {
+		const newline = stdout.indexOf(0x0a, cursor);
+		if (newline === -1) {
+			result.set(relativePath, undefined);
+			continue;
+		}
+		const header = stdout.subarray(cursor, newline).toString("utf8");
+		cursor = newline + 1;
+		if (header.endsWith(" missing")) {
+			result.set(relativePath, undefined);
+			continue;
+		}
+		const size = Number(header.split(" ").at(-1));
+		if (!Number.isFinite(size)) {
+			result.set(relativePath, undefined);
+			continue;
+		}
+		result.set(relativePath, stdout.subarray(cursor, cursor + size).toString("utf8"));
+		cursor += size + 1; // trailing newline after the blob
+	}
+	return result;
 }
 
 export function gitHeadCommit(repoRoot: string): string | undefined {

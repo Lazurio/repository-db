@@ -1,6 +1,16 @@
 export { RepositoryDb } from "./repositoryDb.ts";
-export { Collection, documentFileName } from "./collections.ts";
-export type { CollectionDocument, CollectionOptions } from "./collections.ts";
+export {
+	Collection,
+	documentFileName,
+	recordRevision,
+	recordRevisionFromBytes,
+	writeRecordDraft,
+} from "./collections.ts";
+export type {
+	CollectionDocument,
+	CollectionOptions,
+	RecordWriteOptions,
+} from "./collections.ts";
 export {
 	CONFIG_FILE_NAME,
 	CONFIG_SCHEMA_VERSION,
@@ -30,7 +40,7 @@ export {
 	DEFAULT_GIT_NETWORK_TIMEOUT_MS,
 } from "./git.ts";
 export type { GitResult } from "./git.ts";
-export { publish, pullRemote } from "./publish.ts";
+export { finishSend, publish, pullRemote } from "./publish.ts";
 export type { PullResult } from "./publish.ts";
 export { initDataRepo } from "./init.ts";
 export type { InitOptions, InitResult } from "./init.ts";
@@ -71,3 +81,44 @@ export {
 	writeYamlFileAtomic,
 } from "./yamlIo.ts";
 export * from "./types.ts";
+export {
+	discardDraft,
+	recordRevertAvailability,
+	recordRevertAvailabilityBatch,
+	type RevertAvailability,
+	DraftChangedError,
+	RevertNotSupportedError,
+	type DiscardOptions,
+	type DiscardResult,
+	type DiscardScope,
+} from "./discard.ts";
+export {
+	computeDraftRevision,
+	parseDraftRevision,
+} from "./draftRevision.ts";
+export {
+	clearDraftOrigins,
+	clearDraftOwner,
+	clearDraftProvenance,
+	readDraftOrigins,
+	readDraftOwner,
+	recordDraftOrigin,
+	resolveDraftOrigins,
+	setDraftOwnerIfAbsent,
+	type DraftOriginKind,
+	type DraftOriginRecord,
+	type DraftOwner,
+} from "./origin.ts";
+export {
+	collectInputChanges,
+	computeReviewSnapshot,
+	globToRegExp,
+	readBaselineFile,
+	reviewBaselineRef,
+	type ReviewOptions,
+} from "./review.ts";
+export {
+	structuralDiff,
+	summarizeValue,
+	type StructuralDiffResult,
+} from "./structuralDiff.ts";

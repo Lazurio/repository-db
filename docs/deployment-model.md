@@ -90,12 +90,10 @@ A client deployment separates the shared app from client-owned data:
 - Remote changes are detected via `git fetch` (`status --fetch`); an inbound
   webhook is only an optional faster signal for hosts that can accept one.
 - Publish is one explicit action producing one audited commit per batch:
-  `validate → materialize generated → rebase already-fetched origin/<branch>
-  with autostash → commit with Repository-Db-* trailers → push`, protected by
-  a lock file. The engine
-  detects conflicts from repository state (including conflicted autostash
-  applies where git exits 0) and blocks all writes until an explicit
-  `conflict --resolved` / `conflict --abort`.
+  `validate → materialize generated → commit with Repository-Db-* trailers →
+  send`, all inside the shared lock. Sending integrates a moved remote in a
+  temporary worktree, never in the checkout. A conflict there is recorded and
+  blocks all writes until an explicit `conflict --resolved` / `conflict --abort`.
 
 ## Commit contract
 
