@@ -274,4 +274,43 @@ describe("pull never undoes a drafted deletion", () => {
 			rmSync(fixture.root, { recursive: true, force: true });
 		}
 	});
+	for (const [label, id, colleague] of [
+		["a non-ASCII record name", "čáp-dodávka", "edit"],
+		["a record the colleague renamed", "renamed-away", "rename"],
+	] as const) {
+		test(`the same holds for ${label}`, async () => {
+			const fixture = createFixtureRepo();
+			try {
+				const db = RepositoryDb.open(fixture.mountPath);
+				// Written by name: the fixture helper would percent-encode it.
+				const writeRecord = (root: string, name: string) =>
+					writeFileSync(
+						path.join(root, `data/things/${id}.yaml`),
+						`schemaVersion: thing.v3\nid: x\nrecord:\n  name: ${name}\n`,
+						"utf8",
+					);
+				writeRecord(fixture.mountPath, "Published");
+				git(fixture.mountPath, ["add", "--all"]);
+				git(fixture.mountPath, ["commit", "--message", "publish"]);
+				git(fixture.mountPath, ["push", "--quiet", "origin", fixture.branch]);
+
+				const second = cloneFixture(fixture);
+				if (colleague === "edit") {
+					writeRecord(second, "Changed by a colleague");
+					git(second, ["commit", "--quiet", "--all", "--message", "colleague edit"]);
+				} else {
+					git(second, ["mv", `data/things/${id}.yaml`, "data/things/new-home.yaml"]);
+					git(second, ["commit", "--quiet", "--message", "colleague rename"]);
+				}
+				git(second, ["push", "--quiet", "origin", fixture.branch]);
+
+				rmSync(path.join(fixture.mountPath, `data/things/${id}.yaml`));
+				await expect(db.pull()).rejects.toMatchObject({ code: "pull_blocked_by_draft" });
+				expect(existsSync(path.join(fixture.mountPath, `data/things/${id}.yaml`))).toBe(false);
+				expect(existsSync(path.join(fixture.mountPath, "data/things/new-home.yaml"))).toBe(false);
+			} finally {
+				rmSync(fixture.root, { recursive: true, force: true });
+			}
+		});
+	}
 });

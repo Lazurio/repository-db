@@ -409,8 +409,16 @@ export async function pullRemote(
 			);
 		}
 		const remoteRef = `refs/remotes/origin/${branch}`;
-		const remoteChanges = runGitOrThrow(mountRoot, ["diff", "--name-only", `HEAD...${remoteRef}`])
-			.split("\n")
+		// NUL-separated (no quoting of non-ASCII names) and without rename
+		// detection, so both sides of an incoming rename are listed.
+		const remoteChanges = runGitOrThrow(mountRoot, [
+			"diff",
+			"--name-only",
+			"-z",
+			"--no-renames",
+			`HEAD...${remoteRef}`,
+		])
+			.split("\0")
 			.filter(Boolean);
 		// Checked here, not left to Git: a fast-forward overwrites a tracked
 		// file missing from the working tree, so a drafted (unstaged) deletion
