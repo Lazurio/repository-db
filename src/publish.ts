@@ -18,7 +18,7 @@ import {
 } from "./git.ts";
 import {
 	assertDeclaredGeneratedOnly,
-	isPathDeclared,
+	isUndeclaredGenerated,
 	materializeGenerated,
 	runValidateCommands,
 } from "./generated.ts";
@@ -103,8 +103,8 @@ async function rebaseInLane(
 ): Promise<LaneResult> {
 	const parent = mkdtempSync(path.join(os.tmpdir(), "repository-db-lane-"));
 	const laneRoot = path.join(parent, "lane");
-	runGitOrThrow(mountRoot, ["worktree", "add", "--detach", laneRoot, start]);
 	try {
+		runGitOrThrow(mountRoot, ["worktree", "add", "--detach", laneRoot, start]);
 		const rebase = await runGitAsync(laneRoot, ["rebase", onto]);
 		const unmerged = gitUnmergedPaths(laneRoot);
 		if (rebase.status !== 0 || unmerged.length > 0) {
@@ -149,10 +149,7 @@ function assertUnsentGeneratedDeclared(mountRoot: string, config: RepositoryDbCo
 	)
 		.split("\0")
 		.filter(Boolean);
-	const generatedPrefix = `${config.layout.generated}/`;
-	const undeclared = unsent.filter(
-		(entry) => entry.startsWith(generatedPrefix) && !isPathDeclared(entry, config),
-	);
+	const undeclared = unsent.filter((entry) => isUndeclaredGenerated(entry, config));
 	if (undeclared.length > 0) {
 		throw new RepositoryDbError(
 			"generated_policy",

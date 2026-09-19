@@ -220,3 +220,29 @@ describe("auto-review follow-ups", () => {
 		}
 	});
 });
+
+describe("the bootstrap placeholder is not generated output", () => {
+	test("without an upstream, generated/.gitkeep neither blocks readiness nor the send", async () => {
+		const fixture = createFixtureRepo();
+		try {
+			const db = RepositoryDb.open(fixture.mountPath);
+			writeFileSync(path.join(fixture.mountPath, "generated/.gitkeep"), "", "utf8");
+			writeFixtureDocument(fixture.mountPath, "first", { name: "First" });
+			git(fixture.mountPath, ["add", "--all"]);
+			git(fixture.mountPath, ["commit", "--message", "first publish whose push failed"]);
+			const head = git(fixture.mountPath, ["rev-parse", "HEAD"]).trim();
+			// The first push failed: no remote-tracking ref yet.
+			git(fixture.mountPath, ["update-ref", "-d", `refs/remotes/origin/${fixture.branch}`]);
+
+			const snapshot = await db.review();
+			expect(
+				snapshot.publishReadiness.references.filter((ref) => ref.kind === "generated_policy"),
+			).toEqual([]);
+			const result = await db.finishSend({ expectedHead: head });
+			expect(result.state).toBe("published");
+			expect(git(fixture.originPath, ["rev-parse", fixture.branch]).trim()).toBe(head);
+		} finally {
+			rmSync(fixture.root, { recursive: true, force: true });
+		}
+	});
+});

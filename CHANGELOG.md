@@ -15,7 +15,9 @@
   draft on top of a waiting commit holds that commit to the same generated
   policy. Discarding a draft that holds a nested repository is refused before
   anything changes (`discard_unsupported`). Conflict markers left by another
-  tool point to resolving them, not to an abort that refuses them.
+  tool point to resolving them, not to an abort that refuses them. The empty
+  `generated/.gitkeep` that `init` commits is not generated output: a data repo
+  whose first push failed can still be sent, and review does not block it.
 
 - **The engine owns the whole publish lifecycle.** `publish` confirms the draft
   revision, validates, materializes, commits and sends. Sending replays onto a

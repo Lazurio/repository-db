@@ -3,7 +3,7 @@ import { lstatSync, readFileSync, readlinkSync } from "node:fs";
 import path from "node:path";
 import { assertDataRepoBoundary } from "./boundary.ts";
 import { activeConflict } from "./conflict.ts";
-import { isPathDeclared, undeclaredGeneratedDiffs } from "./generated.ts";
+import { isPathDeclared, isUndeclaredGenerated, undeclaredGeneratedDiffs } from "./generated.ts";
 import {
 	gitBatchShow,
 	gitDirtyPaths,
@@ -448,14 +448,13 @@ function publishReadiness(
 
 	// Everything unsent counts, not only the dirty tree: a committed artifact
 	// that is not declared is refused by the policy just the same.
-	const generatedPrefix = `${config.layout.generated}/`;
 	const undeclared = [
 		...new Set([
 			...undeclaredGeneratedDiffs(mountRoot, config),
 			...resources
 				.flatMap((resource) => resource.changes.flatMap((change) => change.technicalRefs))
 				.map((ref) => ref.path)
-				.filter((entry) => entry.startsWith(generatedPrefix) && !isPathDeclared(entry, config)),
+				.filter((entry) => isUndeclaredGenerated(entry, config)),
 		]),
 	].sort();
 	if (undeclared.length > 0) {
