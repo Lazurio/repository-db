@@ -303,7 +303,10 @@ export function DraftPublishPanel({
 				) {
 					return;
 				}
-				void run(() => api.abortConflict?.() ?? Promise.resolve(), "Synchronizace zrušena.");
+				void run(
+					() => api.abortConflict?.() ?? Promise.resolve(),
+					"Odeslání zrušeno, změny jsou zase rozpracované.",
+				);
 				return;
 			}
 			if (kind === "mark_conflict_resolved" && api.markConflictResolved) {
