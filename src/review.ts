@@ -89,14 +89,10 @@ export function readBaselineFile(
 	 * The baseline to read from. Pass the ref resolved once per request —
 	 * resolving it per path costs a `git merge-base` per record.
 	 */
-	baseline?: RepositoryDbConfig | string,
+	baseline: RepositoryDbConfig | string,
 ): string | undefined {
-	const ref =
-		typeof baseline === "string"
-			? baseline
-			: baseline
-				? reviewBaselineRef(mountRoot, baseline)
-				: "HEAD";
+	// Required: HEAD is not the published state when a commit waits to be sent.
+	const ref = typeof baseline === "string" ? baseline : reviewBaselineRef(mountRoot, baseline);
 	return baselineContent(mountRoot, ref, relativePath);
 }
 
@@ -252,10 +248,14 @@ export function reviewBaselineRef(mountRoot: string, config: RepositoryDbConfig)
 	const remoteBranch = `origin/${config.dataRepo.branch}`;
 	const mergeBase = runGit(mountRoot, ["merge-base", "HEAD", remoteBranch]);
 	if (mergeBase.status === 0 && mergeBase.stdout.trim()) return mergeBase.stdout.trim();
-	// No upstream yet (fresh data repo): everything committed is still unsent,
-	// but there is nothing to compare against, so HEAD is the honest baseline.
-	return "HEAD";
+	// Nothing published to compare with (no upstream yet): everything committed
+	// is still unsent, so the baseline is the empty tree — never HEAD, which
+	// would hide those commits.
+	return EMPTY_TREE;
 }
+
+/** Git's well-known empty tree: a baseline in which nothing exists yet. */
+const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
 /** Everything not yet published: committed-but-unsent changes and the dirty set. */
 export function collectInputChanges(
@@ -287,7 +287,9 @@ export function collectInputChanges(
 					.filter((entry) => !entry.startsWith(`${ENGINE_DIR}/`));
 
 	const unpublishedPaths = [...new Set([...committedPaths, ...dirtyPaths])].sort();
-	const origins = resolveDraftOrigins(mountRoot, dirtyPaths);
+	// Committed-but-unsent changes keep their recorded origin too: provenance is
+	// cleared only when the send succeeds.
+	const origins = resolveDraftOrigins(mountRoot, unpublishedPaths);
 	// One git process for every baseline, instead of one per record.
 	const baselines = gitBatchShow(mountRoot, baselineRef, unpublishedPaths);
 
@@ -444,7 +446,18 @@ function publishReadiness(
 		});
 	}
 
-	const undeclared = undeclaredGeneratedDiffs(mountRoot, config);
+	// Everything unsent counts, not only the dirty tree: a committed artifact
+	// that is not declared is refused by the policy just the same.
+	const generatedPrefix = `${config.layout.generated}/`;
+	const undeclared = [
+		...new Set([
+			...undeclaredGeneratedDiffs(mountRoot, config),
+			...resources
+				.flatMap((resource) => resource.changes.flatMap((change) => change.technicalRefs))
+				.map((ref) => ref.path)
+				.filter((entry) => entry.startsWith(generatedPrefix) && !isPathDeclared(entry, config)),
+		]),
+	].sort();
 	if (undeclared.length > 0) {
 		references.push({
 			kind: "generated_policy",

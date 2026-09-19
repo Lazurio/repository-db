@@ -95,8 +95,8 @@ function RecordRow({
 			<p className="rdb-draft-summary">{record.summary}</p>
 			{record.fields.length > 0 && (
 				<ul className="rdb-draft-fields">
-					{record.fields.map((field) => (
-						<li key={field.fieldPath}>
+					{record.fields.map((field, index) => (
+						<li key={`${index}:${field.fieldPath}`}>
 							<span className="rdb-draft-field-label">{field.label}</span>
 							<span className="rdb-draft-before">{field.before}</span>
 							<span className="rdb-draft-arrow" aria-hidden="true">

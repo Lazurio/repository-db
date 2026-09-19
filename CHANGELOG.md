@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Review hides nothing unsent: without an upstream it compares against the empty
+  tree; committed-but-unsent changes keep their recorded origin; an undeclared
+  generated file in an unsent commit blocks publish readiness. The draft
+  revision covers a nested repository's checked-out commit. The panel lists
+  every change a resource groups. **Breaking:** `readBaselineFile` needs the
+  baseline (ref or config); it no longer defaults to HEAD.
+
 - **The engine owns the whole publish lifecycle.** `publish` confirms the draft
   revision, validates, materializes, commits and sends. Sending replays onto a
   moved remote in a temporary worktree — never in the checkout, which moves

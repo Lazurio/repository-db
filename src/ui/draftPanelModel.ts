@@ -124,8 +124,11 @@ const CHANGE_LABELS: Record<string, string> = {
 };
 
 function recordOf(input: DraftPanelRecordInput): DraftPanelRecord {
-	const change = input.resource.changes[0];
-	const originKind = change?.origin?.kind ?? "unknown";
+	// A resource may group several changes; every one of them is shown.
+	const changes = input.resource.changes;
+	const change = changes[0];
+	const kinds = [...new Set(changes.map((entry) => entry.kind))];
+	const originKind = changes.find((entry) => entry.origin?.kind)?.origin?.kind ?? "unknown";
 	const typeLabel =
 		typeof input.resource.metadata?.typeLabel === "string"
 			? input.resource.metadata.typeLabel
@@ -135,18 +138,23 @@ function recordOf(input: DraftPanelRecordInput): DraftPanelRecord {
 		id: input.resource.stableResourceId,
 		label: input.resource.label,
 		typeLabel,
-		changeLabel: CHANGE_LABELS[change?.kind ?? "unknown"] ?? "Změna",
-		summary: change?.summary ?? "",
+		changeLabel: CHANGE_LABELS[kinds.length === 1 ? (change?.kind ?? "unknown") : "modified"] ?? "Změna",
+		summary: changes
+			.map((entry) => entry.summary)
+			.filter(Boolean)
+			.join(" · "),
 		originKind,
 		originLabel: ORIGIN_LABELS[originKind],
 		href: input.resource.routeTarget?.href,
 		openLabel: input.resource.routeTarget?.label ?? "Otevřít",
-		fields: (change?.fields ?? []).map((field) => ({
-			fieldPath: field.fieldPath,
-			label: field.label,
-			before: field.beforeSummary ?? "—",
-			after: field.afterSummary ?? "—",
-		})),
+		fields: changes.flatMap((entry) =>
+			entry.fields.map((field) => ({
+				fieldPath: field.fieldPath,
+				label: field.label,
+				before: field.beforeSummary ?? "—",
+				after: field.afterSummary ?? "—",
+			})),
+		),
 		technicalPath: input.technicalPath,
 		revertSupported: input.revert.supported,
 		revertBlockedReason: input.revert.reason,

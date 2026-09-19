@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { lstatSync, readFileSync, readlinkSync } from "node:fs";
 import path from "node:path";
-import { gitDirtyPaths, gitHeadCommit, gitRenameSources } from "./git.ts";
+import { gitDirtyPaths, gitHeadCommit, gitRenameSources, runGit } from "./git.ts";
 import { ENGINE_DIR } from "./lock.ts";
 
 /**
@@ -65,7 +65,13 @@ function contentHash(mountRoot: string, dirtyPaths: readonly string[]): string {
 		}
 		let content: Buffer | string;
 		try {
-			content = stats.isSymbolicLink() ? readlinkSync(absolute) : readFileSync(absolute);
+			// A directory in the dirty set is a submodule: what would be committed
+			// is the commit it has checked out.
+			content = stats.isSymbolicLink()
+				? readlinkSync(absolute)
+				: stats.isDirectory()
+					? `gitlink:${runGit(absolute, ["rev-parse", "HEAD"]).stdout.trim()}`
+					: readFileSync(absolute);
 		} catch {
 			hash.update("unreadable");
 			continue;
