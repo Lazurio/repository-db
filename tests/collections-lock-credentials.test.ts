@@ -93,6 +93,26 @@ describe("collections", () => {
 });
 
 describe("publish lock", () => {
+	test("a write during a publish fails at once instead of blocking the event loop", () => {
+		const fixture = createFixtureRepo();
+		try {
+			const db = RepositoryDb.open(fixture.mountPath);
+			const things = db.collection("things", { schemaVersion: "thing.v3" });
+			const release = acquirePublishLock(fixture.mountPath);
+			const started = performance.now();
+			try {
+				expect(() => things.put("during", { name: "x" }, {}, { baseRevision: null })).toThrow(
+					expect.objectContaining({ code: "draft_write_blocked" }),
+				);
+			} finally {
+				release();
+			}
+			expect(performance.now() - started).toBeLessThan(1000);
+		} finally {
+			rmSync(fixture.root, { recursive: true, force: true });
+		}
+	});
+
 	test("second acquire fails while the lock is held, then succeeds after release", () => {
 		const root = path.join(os.tmpdir(), `repository-db-lock-${process.pid}`);
 		mkdirSync(root, { recursive: true });
