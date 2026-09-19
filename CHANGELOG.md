@@ -18,6 +18,9 @@
   tool point to resolving them, not to an abort that refuses them. The empty
   `generated/.gitkeep` that `init` commits is not generated output: a data repo
   whose first push failed can still be sent, and review does not block it.
+  `pull` checks the drafted files against the incoming ones itself: a record
+  deleted in the draft and changed by a colleague no longer comes back
+  silently (Git's fast-forward overwrites a missing tracked file).
 
 - **The engine owns the whole publish lifecycle.** `publish` confirms the draft
   revision, validates, materializes, commits and sends. Sending replays onto a

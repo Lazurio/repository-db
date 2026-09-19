@@ -5,7 +5,7 @@ import { computeDraftRevision } from "../src/draftRevision.ts";
 import { RepositoryDb } from "../src/repositoryDb.ts";
 import { deriveDraftPanel } from "../src/ui/draftPanelModel.ts";
 import { REVIEW_SURFACE_CONTRACT_VERSION } from "../src/types.ts";
-import { createFixtureRepo, git, writeFixtureDocument } from "./fixtures.ts";
+import { cloneFixture, createFixtureRepo, git, writeFixtureDocument } from "./fixtures.ts";
 
 /** Regressions for the review threads on PR #12, one per confirmed finding. */
 
@@ -241,6 +241,35 @@ describe("the bootstrap placeholder is not generated output", () => {
 			const result = await db.finishSend({ expectedHead: head });
 			expect(result.state).toBe("published");
 			expect(git(fixture.originPath, ["rev-parse", fixture.branch]).trim()).toBe(head);
+		} finally {
+			rmSync(fixture.root, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("pull never undoes a drafted deletion", () => {
+	test("a record deleted in the draft and changed by a colleague blocks the pull", async () => {
+		const fixture = createFixtureRepo();
+		try {
+			const db = RepositoryDb.open(fixture.mountPath);
+			writeFixtureDocument(fixture.mountPath, "shared", { name: "Published" });
+			git(fixture.mountPath, ["add", "--all"]);
+			git(fixture.mountPath, ["commit", "--message", "publish shared"]);
+			git(fixture.mountPath, ["push", "--quiet", "origin", fixture.branch]);
+
+			const second = cloneFixture(fixture);
+			writeFixtureDocument(second, "shared", { name: "Changed by a colleague" });
+			git(second, ["commit", "--quiet", "--all", "--message", "colleague edit"]);
+			git(second, ["push", "--quiet", "origin", fixture.branch]);
+
+			// The draft deletes the record the way the engine does: unstaged.
+			const recordPath = path.join(fixture.mountPath, "data/things/shared.yaml");
+			rmSync(recordPath);
+			const head = git(fixture.mountPath, ["rev-parse", "HEAD"]).trim();
+
+			await expect(db.pull()).rejects.toMatchObject({ code: "pull_blocked_by_draft" });
+			expect(existsSync(recordPath)).toBe(false);
+			expect(git(fixture.mountPath, ["rev-parse", "HEAD"]).trim()).toBe(head);
 		} finally {
 			rmSync(fixture.root, { recursive: true, force: true });
 		}

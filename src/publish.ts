@@ -11,6 +11,7 @@ import {
 	gitDirtyPaths,
 	gitFetchAsync,
 	gitHeadCommit,
+	gitRenameSources,
 	gitUnmergedPaths,
 	runGit,
 	runGitAsync,
@@ -411,6 +412,20 @@ export async function pullRemote(
 		const remoteChanges = runGitOrThrow(mountRoot, ["diff", "--name-only", `HEAD...${remoteRef}`])
 			.split("\n")
 			.filter(Boolean);
+		// Checked here, not left to Git: a fast-forward overwrites a tracked
+		// file missing from the working tree, so a drafted (unstaged) deletion
+		// would silently come back with the colleague's content.
+		const drafted = new Set([
+			...engineDirFree(gitDirtyPaths(mountRoot)),
+			...gitRenameSources(mountRoot).values(),
+		]);
+		const overlap = remoteChanges.filter((entry) => drafted.has(entry));
+		if (overlap.length > 0) {
+			throw new RepositoryDbError(
+				"pull_blocked_by_draft",
+				`Colleagues published changes to files this draft also changes (${overlap.join(", ")}); nothing was pulled. Publish or revert those records first.`,
+			);
+		}
 		const merge = runGit(mountRoot, ["merge", "--ff-only", remoteRef]);
 		if (merge.status !== 0) {
 			throw new RepositoryDbError(
