@@ -55,6 +55,15 @@ export function recordRevision(filePath: string): string | null {
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
 		throw error;
 	}
+	return recordRevisionFromBytes(bytes);
+}
+
+/**
+ * The same revision for bytes the caller already read. A host that parses a
+ * record and hands out its revision must take both from one read; reading the
+ * file twice could pair old content with a newer revision.
+ */
+export function recordRevisionFromBytes(bytes: Uint8Array): string {
 	return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
 }
 

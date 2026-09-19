@@ -3,6 +3,7 @@ export {
 	Collection,
 	documentFileName,
 	recordRevision,
+	recordRevisionFromBytes,
 	writeRecordDraft,
 } from "./collections.ts";
 export type {

@@ -21,7 +21,8 @@
   place; when an incoming change touches a drafted file the pull is refused
   (`pull_blocked_by_draft`) and nothing moves. With a commit waiting it refuses
   with `send_pending`. `PullResult` and `PublishResult` report `remoteChanges`.
-- **Record revisions.** `recordRevision(file)`, `Collection.revision(id)`, and a
+- **Record revisions.** `recordRevision(file)` (and `recordRevisionFromBytes`
+  for a host that parses the same read), `Collection.revision(id)`, and a
   `baseRevision` option on `Collection.put/remove` and the new
   `writeRecordDraft` (for layouts a collection does not describe): the version
   check and the write run under the shared gate; a stale save fails with
