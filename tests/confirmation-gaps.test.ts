@@ -66,14 +66,24 @@ describe("the confirmed revision covers the whole publish", () => {
 		}
 	});
 
-	test("an empty confirmation is a malformed one, not an absent one", async () => {
+	test("publish without a confirmed revision is refused, empty or missing alike", async () => {
 		const fixture = createFixtureRepo();
 		try {
 			const db = RepositoryDb.open(fixture.mountPath);
 			writeFixtureDocument(fixture.mountPath, "thing", { name: "Draft" });
 
+			for (const expectedRevision of [undefined, "", "   "]) {
+				await expect(
+					db.publish({
+						actor: ACTOR,
+						source: "test",
+						expectedRevision: expectedRevision as string,
+						skipValidate: true,
+					}),
+				).rejects.toThrow(/pass the revision that was shown/);
+			}
 			await expect(
-				db.publish({ actor: ACTOR, source: "test", expectedRevision: "", skipValidate: true }),
+				db.publish({ actor: ACTOR, source: "test", expectedRevision: "draft:x.y", skipValidate: true }),
 			).rejects.toThrow(DraftChangedError);
 			expect(db.status().state).toBe("draft");
 		} finally {
@@ -210,13 +220,7 @@ describe("finishing a send is not a publish", () => {
 			writeFixtureDocument(fixture.mountPath, "unreviewed", { name: "After failed push" });
 
 			await expect(
-				db.publish({
-					actor: ACTOR,
-					source: "test",
-					finishSendOnly: true,
-					expectedHead: await pendingHead,
-					skipValidate: true,
-				}),
+				db.finishSend({ expectedHead: (await pendingHead) as string }),
 			).rejects.toThrow(/beyond the commit waiting to be sent/);
 
 			// The new record is still only local.
@@ -238,13 +242,7 @@ describe("finishing a send is not a publish", () => {
 			git(fixture.mountPath, ["commit", "--message", "publish that failed to push"]);
 			const snapshot = await db.review();
 
-			const result = await db.publish({
-				actor: ACTOR,
-				source: "test",
-				finishSendOnly: true,
-				expectedHead: snapshot.head,
-				skipValidate: true,
-			});
+			const result = await db.finishSend({ expectedHead: snapshot.head as string });
 
 			expect(result.state).toBe("published");
 			expect(db.status().state).toBe("published");
@@ -268,13 +266,7 @@ describe("finishing a send is not a publish", () => {
 			git(fixture.mountPath, ["commit", "--message", "publish that failed to push"]);
 
 			await expect(
-				db.publish({
-					actor: ACTOR,
-					source: "test",
-					finishSendOnly: true,
-					expectedHead: "0".repeat(40),
-					skipValidate: true,
-				}),
+				db.finishSend({ expectedHead: "0".repeat(40) }),
 			).rejects.toThrow(/no longer the one that was shown/);
 		} finally {
 			rmSync(fixture.root, { recursive: true, force: true });
@@ -377,7 +369,7 @@ describe("publishing a draft that regenerates output", () => {
 			const result = await db.publish({
 				actor: ACTOR,
 				source: "test",
-				expectedRevision: snapshot.draftRevision,
+				expectedRevision: snapshot.draftRevision as string,
 			});
 
 			// The regenerated rollup is part of the publish, not a reason to refuse it.
@@ -393,7 +385,7 @@ describe("publishing a draft that regenerates output", () => {
 });
 
 describe("round 2 — finishing a send must name its commit", () => {
-	test("finishSendOnly without expectedHead is refused before anything moves", async () => {
+	test("finishSend without expectedHead is refused before anything moves", async () => {
 		const fixture = createFixtureRepo();
 		try {
 			const db = RepositoryDb.open(fixture.mountPath);
@@ -405,15 +397,9 @@ describe("round 2 — finishing a send must name its commit", () => {
 			const remoteBefore = git(fixture.originPath, ["rev-parse", fixture.branch]).trim();
 
 			for (const expectedHead of [undefined, "", "   "]) {
-				await expect(
-					db.publish({
-						actor: ACTOR,
-						source: "test",
-						finishSendOnly: true,
-						expectedHead,
-						skipValidate: true,
-					}),
-				).rejects.toThrow(/requires the commit that was shown/);
+				await expect(db.finishSend({ expectedHead: expectedHead as string })).rejects.toThrow(
+					/requires the commit that was shown/,
+				);
 			}
 			// Nothing reached the remote.
 			expect(git(fixture.originPath, ["rev-parse", fixture.branch]).trim()).toBe(remoteBefore);
@@ -556,8 +542,8 @@ describe("round 2 — the gate's release belongs to its acquisition", () => {
 	});
 });
 
-describe("round 2 — the CLI demands the head too", () => {
-	test("--finish-send without --head is refused and pushes nothing", async () => {
+describe("round 2 — the CLI demands the head and the revision", () => {
+	test("finish-send without --head and publish without --revision are refused and push nothing", async () => {
 		const { spawnSync } = await import("node:child_process");
 		const fixture = createFixtureRepo();
 		try {
@@ -567,25 +553,20 @@ describe("round 2 — the CLI demands the head too", () => {
 			git(fixture.mountPath, ["add", "--all"]);
 			git(fixture.mountPath, ["commit", "--message", "publish that failed to push"]);
 			const remoteBefore = git(fixture.originPath, ["rev-parse", fixture.branch]).trim();
+			const cli = (...args: string[]) =>
+				spawnSync(process.execPath, [path.join(import.meta.dir, "../src/cli.ts"), ...args], {
+					encoding: "utf8",
+				});
 
-			const run = spawnSync(
-				process.execPath,
-				[
-					path.join(import.meta.dir, "../src/cli.ts"),
-					"publish",
-					"--mount",
-					fixture.mountPath,
-					"--actor",
-					ACTOR,
-					"--source",
-					"test",
-					"--finish-send",
-				],
-				{ encoding: "utf8" },
-			);
+			const finish = cli("finish-send", "--mount", fixture.mountPath);
+			expect(finish.status).not.toBe(0);
+			expect(finish.stderr).toContain("missing required flag --head");
 
-			expect(run.status).not.toBe(0);
-			expect(run.stderr).toContain("--finish-send requires --head");
+			writeFixtureDocument(fixture.mountPath, "draft", { name: "Draft" });
+			const publish = cli("publish", "--mount", fixture.mountPath, "--actor", ACTOR, "--source", "test");
+			expect(publish.status).not.toBe(0);
+			expect(publish.stderr).toContain("missing required flag --revision");
+
 			expect(git(fixture.originPath, ["rev-parse", fixture.branch]).trim()).toBe(remoteBefore);
 		} finally {
 			rmSync(fixture.root, { recursive: true, force: true });
@@ -666,7 +647,7 @@ describe("round 2 — declared artifacts outside generated/ do not trip the chec
 			const result = await db.publish({
 				actor: ACTOR,
 				source: "test",
-				expectedRevision: snapshot.draftRevision,
+				expectedRevision: snapshot.draftRevision as string,
 			});
 			expect(result.state).toBe("published");
 		} finally {
@@ -792,8 +773,7 @@ describe("round 3 — a confirmed publish of a staged rename does not refuse its
 			writeFixtureDocument(fixture.mountPath, "old-name", { name: "Published" });
 			publishBaseline(fixture);
 			// An agent renames a record; a colleague publishes meanwhile, so the
-			// publish integrates and its autostash turns the rename into an add
-			// plus an unstaged delete.
+			// publish has to integrate the rename onto their work.
 			git(fixture.mountPath, ["mv", "data/things/old-name.yaml", "data/things/new-name.yaml"]);
 			publishRemoteChange(fixture);
 
@@ -802,7 +782,7 @@ describe("round 3 — a confirmed publish of a staged rename does not refuse its
 			const result = await db.publish({
 				actor: ACTOR,
 				source: "test",
-				expectedRevision: snapshot.draftRevision,
+				expectedRevision: snapshot.draftRevision as string,
 				skipValidate: true,
 			});
 
@@ -827,7 +807,7 @@ describe("round 3 — a confirmed publish of a staged rename does not refuse its
 			const result = await db.publish({
 				actor: ACTOR,
 				source: "test",
-				expectedRevision: snapshot.draftRevision,
+				expectedRevision: snapshot.draftRevision as string,
 				skipValidate: true,
 			});
 			expect(result.state).toBe("published");
@@ -998,12 +978,7 @@ describe("round 3 — finishing a send runs nothing that writes the tree", () =>
 			git(fixture.mountPath, ["commit", "--message", "publish that failed to push"]);
 			const pendingHead = git(fixture.mountPath, ["rev-parse", "HEAD"]).trim();
 
-			const result = await db.publish({
-				actor: ACTOR,
-				source: "test",
-				finishSendOnly: true,
-				expectedHead: pendingHead,
-			});
+			const result = await db.finishSend({ expectedHead: pendingHead });
 
 			expect(result.state).toBe("published");
 			// Exactly the pending commit reached the remote, and nothing new was written.
@@ -1094,13 +1069,7 @@ describe("round 3 — finish-send never makes a commit of its own", () => {
 			git(fixture.mountPath, ["commit", "--message", "publish that failed to push"]);
 			const pendingHead = git(fixture.mountPath, ["rev-parse", "HEAD"]).trim();
 
-			const result = await db.publish({
-				actor: ACTOR,
-				source: "test",
-				finishSendOnly: true,
-				expectedHead: pendingHead,
-				skipValidate: true,
-			});
+			const result = await db.finishSend({ expectedHead: pendingHead });
 			expect(result.state).toBe("published");
 			expect(git(fixture.originPath, ["rev-parse", fixture.branch]).trim()).toBe(pendingHead);
 			expect(git(fixture.mountPath, ["rev-parse", "HEAD"]).trim()).toBe(pendingHead);

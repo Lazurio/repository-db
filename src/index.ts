@@ -1,6 +1,15 @@
 export { RepositoryDb } from "./repositoryDb.ts";
-export { Collection, documentFileName } from "./collections.ts";
-export type { CollectionDocument, CollectionOptions } from "./collections.ts";
+export {
+	Collection,
+	documentFileName,
+	recordRevision,
+	writeRecordDraft,
+} from "./collections.ts";
+export type {
+	CollectionDocument,
+	CollectionOptions,
+	RecordWriteOptions,
+} from "./collections.ts";
 export {
 	CONFIG_FILE_NAME,
 	CONFIG_SCHEMA_VERSION,
@@ -30,7 +39,7 @@ export {
 	DEFAULT_GIT_NETWORK_TIMEOUT_MS,
 } from "./git.ts";
 export type { GitResult } from "./git.ts";
-export { publish, pullRemote } from "./publish.ts";
+export { finishSend, publish, pullRemote } from "./publish.ts";
 export type { PullResult } from "./publish.ts";
 export { initDataRepo } from "./init.ts";
 export type { InitOptions, InitResult } from "./init.ts";
@@ -83,7 +92,6 @@ export {
 	type DiscardScope,
 } from "./discard.ts";
 export {
-	computeCanonicalContentHash,
 	computeDraftRevision,
 	parseDraftRevision,
 } from "./draftRevision.ts";

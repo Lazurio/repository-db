@@ -57,7 +57,7 @@ describe("publish flow", () => {
 			writeFixtureDocument(fixture.mountPath, "thing-1", { name: "first" });
 			writeFixtureDocument(fixture.mountPath, "thing-2", { name: "second" });
 
-			const result = await db.publish({
+			const result = await db.publish({ expectedRevision: db.draftRevision(),
 				actor: "Test Actor <test@spectoda.com>",
 				source: "repository-db-test",
 				entities: ["thing-1", "thing-2"],
@@ -94,7 +94,7 @@ describe("publish flow", () => {
 		}
 	});
 
-	test("publish integrates non-conflicting remote changes via rebase", async () => {
+	test("publish integrates non-conflicting remote changes in the lane and reports them", async () => {
 		const fixture = createFixtureRepo();
 		try {
 			const second = cloneFixture(fixture);
@@ -105,11 +105,13 @@ describe("publish flow", () => {
 
 			const db = RepositoryDb.open(fixture.mountPath);
 			writeFixtureDocument(fixture.mountPath, "thing-local", { name: "local" });
-			const result = await db.publish({
+			const result = await db.publish({ expectedRevision: db.draftRevision(),
 				actor: "Test Actor <test@spectoda.com>",
 				source: "repository-db-test",
 			});
 			expect(result.state).toBe("published");
+			expect(result.remoteChanges).toEqual(["data/things/thing-remote.yaml"]);
+			expect(existsSync(path.join(fixture.mountPath, "data/things/thing-remote.yaml"))).toBe(true);
 			const status = await db.statusAsync({ fetch: true });
 			expect(status.state).toBe("published");
 			expect(status.behind).toBe(0);
@@ -118,7 +120,7 @@ describe("publish flow", () => {
 		}
 	});
 
-	test("pull integrates remote changes and preserves the local draft (autostash)", async () => {
+	test("pull fast-forwards under a draft on other files and keeps the draft", async () => {
 		const fixture = createFixtureRepo();
 		try {
 			const db = RepositoryDb.open(fixture.mountPath);
@@ -134,7 +136,11 @@ describe("publish flow", () => {
 			writeFixtureDocument(fixture.mountPath, "thing-local", { name: "draft" });
 
 			const result = await db.pull();
-			expect(result).toEqual({ state: "pulled", behind: 1 });
+			expect(result).toEqual({
+				state: "pulled",
+				behind: 1,
+				remoteChanges: ["data/things/thing-remote.yaml"],
+			});
 
 			// Remote document arrived, local draft survived uncommitted.
 			expect(
@@ -148,13 +154,13 @@ describe("publish flow", () => {
 			expect(status.dirtyPaths).toContain("data/things/thing-local.yaml");
 			expect(status.behind).toBe(0);
 
-			expect(await db.pull()).toEqual({ state: "up_to_date", behind: 0 });
+			expect(await db.pull()).toEqual({ state: "up_to_date", behind: 0, remoteChanges: [] });
 		} finally {
 			rmSync(fixture.root, { recursive: true, force: true });
 		}
 	});
 
-	test("pull conflict records recovery state and blocks writes", async () => {
+	test("pull never merges into the draft: a remote change to a drafted file is refused and nothing moves", async () => {
 		const fixture = createFixtureRepo();
 		try {
 			const db = RepositoryDb.open(fixture.mountPath);
@@ -170,11 +176,15 @@ describe("publish flow", () => {
 			git(second, ["push", "origin", fixture.branch]);
 
 			writeFixtureDocument(fixture.mountPath, "thing-1", { name: "local-version" });
-			await expect(db.pull()).rejects.toThrow(/pull stopped: conflict/);
-			expect(db.status().state).toBe("conflict");
+			const headBefore = git(fixture.mountPath, ["rev-parse", "HEAD"]).trim();
+			await expect(db.pull()).rejects.toThrow(/nothing was pulled/);
 
-			db.abortConflict();
+			expect(git(fixture.mountPath, ["rev-parse", "HEAD"]).trim()).toBe(headBefore);
+			expect(db.conflict()).toBeUndefined();
 			expect(db.status().state).toBe("draft");
+			expect(
+				readFileSync(path.join(fixture.mountPath, "data/things/thing-1.yaml"), "utf8"),
+			).toContain("local-version");
 		} finally {
 			rmSync(fixture.root, { recursive: true, force: true });
 		}
@@ -185,7 +195,7 @@ describe("publish flow", () => {
 		try {
 			const db = RepositoryDb.open(fixture.mountPath);
 			expect(
-				(await db.publish({ actor: "a <a@a>", source: "test" })).state,
+				(await db.publish({ expectedRevision: db.draftRevision(), actor: "a <a@a>", source: "test" })).state,
 			).toBe("nothing_to_publish");
 		} finally {
 			rmSync(fixture.root, { recursive: true, force: true });
@@ -211,11 +221,14 @@ describe("publish flow", () => {
 
 			const db = RepositoryDb.open(fixture.mountPath);
 			writeFixtureDocument(fixture.mountPath, "thing-1", { name: "first" });
-			const result = await db.publish({ actor: "a <a@a>", source: "test" });
+			const result = await db.publish({ expectedRevision: db.draftRevision(), actor: "a <a@a>", source: "test" });
 
 			expect(result.state).toBe("published");
-			expect(git(fixture.mountPath, ["status", "--porcelain"]).trim()).toBe("");
-			expect(readFileSync(gitignorePath, "utf8")).toContain("/.repository-db/");
+			expect(
+				git(fixture.mountPath, ["status", "--porcelain"])
+					.split("\n")
+					.filter((line) => line && !line.includes(".repository-db/")),
+			).toEqual([]);
 			expect(
 				git(fixture.originPath, [
 					"ls-tree",
@@ -242,7 +255,7 @@ describe("publish flow", () => {
 				"utf8",
 			);
 			await expect(
-				db.publish({ actor: "a <a@a>", source: "test" }),
+				db.publish({ expectedRevision: db.draftRevision(), actor: "a <a@a>", source: "test" }),
 			).rejects.toThrow(/undeclared generated diffs/);
 
 			// Declare it in the manifest -> publish passes.
@@ -253,7 +266,7 @@ describe("publish flow", () => {
 			);
 			writeFileSync(configPath, config, "utf8");
 			const db2 = RepositoryDb.open(fixture.mountPath);
-			const result = await db2.publish({ actor: "a <a@a>", source: "test" });
+			const result = await db2.publish({ expectedRevision: db2.draftRevision(), actor: "a <a@a>", source: "test" });
 			expect(result.state).toBe("published");
 		} finally {
 			rmSync(fixture.root, { recursive: true, force: true });

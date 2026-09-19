@@ -14,9 +14,10 @@ Usage:
   repository-db status   [--mount <path>] [--fetch] [--json]
   repository-db validate [--mount <path>]
   repository-db sync     [--mount <path>] [--pull] [--json]
-  repository-db publish  [--mount <path>] --actor <actor> --source <source>
-                         [--summary <text>] [--entity <id>]... [--revision <rev>]
-                         [--finish-send --head <sha>] [--json]
+  repository-db publish  [--mount <path>] --revision <draft-revision>
+                         --actor <actor> --source <source>
+                         [--summary <text>] [--entity <id>]... [--json]
+  repository-db finish-send [--mount <path>] --head <sha> [--json]
   repository-db review   [--mount <path>] [--json] [--inputs]
   repository-db discard  [--mount <path>] (--record <p> | --draft)
                          [--revision <draft-revision>] [--json]
@@ -28,8 +29,12 @@ Notes:
   --mount defaults to the current working directory. Every command verifies
   the Git boundary (repo root, origin remote, branch) against repository-db.yaml
   before touching anything; commands refuse to run from a parent code repo.
-  Publish = validate -> materialize generated -> rebase fetched origin/<branch>
-  with autostash -> one commit with Repository-Db-* trailers -> push.
+  Publish confirms the draft revision printed by review, then validates,
+  materializes generated output, makes one commit with Repository-Db-*
+  trailers and sends it; a remote that moved meanwhile is integrated in a
+  separate worktree, never in the checkout. When the send fails, the commit
+  waits; finish-send pushes exactly that commit (--head, as printed by
+  status/review) and never makes a new one. sync --pull only fast-forwards.
   Review reports the current draft as reviewable resources and prints its
   revision. Discard returns one record or the whole draft to the published
   state and runs only if the draft still matches that revision; omit
@@ -65,7 +70,6 @@ function parseArgs(argv: string[]): Args {
 			"pull",
 			"draft",
 			"inputs",
-			"finish-send",
 		]);
 		if (boolFlags.has(name)) {
 			flags.set(name, true);
@@ -171,7 +175,7 @@ async function main(argv: string[]): Promise<number> {
 				emit(args, { pulled, status }, () =>
 					[
 						pulled.state === "pulled"
-							? `pulled ${pulled.behind} remote commit(s) (rebase --autostash)`
+							? `pulled ${pulled.behind} remote commit(s) (fast-forward)`
 							: "already up to date with the remote",
 						`state: ${status.state}`,
 					].join("\n"),
@@ -184,7 +188,7 @@ async function main(argv: string[]): Promise<number> {
 					`fetched origin; state: ${status.state}`,
 					`ahead: ${status.ahead}, behind: ${status.behind}`,
 					status.behind > 0
-						? "remote changes available — run `repository-db sync --pull` (autostash-safe) or publish"
+						? "remote changes available — run `repository-db sync --pull` or publish"
 						: "checkout is up to date with the remote",
 				].join("\n"),
 			);
@@ -192,13 +196,6 @@ async function main(argv: string[]): Promise<number> {
 		}
 		case "publish": {
 			const db = RepositoryDb.open(mountPath(args));
-			const finishSend = args.flags.get("finish-send") === true;
-			if (finishSend && typeof args.flags.get("head") !== "string") {
-				throw new RepositoryDbError(
-					"invalid_args",
-					"--finish-send requires --head <sha> (the commit waiting to be sent, as printed by review)",
-				);
-			}
 			const result = await db.publish({
 				actor: requireFlag(args, "actor"),
 				source: requireFlag(args, "source"),
@@ -207,23 +204,22 @@ async function main(argv: string[]): Promise<number> {
 						? (args.flags.get("summary") as string)
 						: undefined,
 				entities: args.entities.length > 0 ? args.entities : undefined,
-				// A supplied revision is a confirmation of a specific draft and
-				// must reach the engine; silently dropping it would make the
-				// flag look like a guard while publishing whatever is there now.
-				expectedRevision:
-					typeof args.flags.get("revision") === "string"
-						? (args.flags.get("revision") as string)
-						: undefined,
-				expectedHead:
-					typeof args.flags.get("head") === "string"
-						? (args.flags.get("head") as string)
-						: undefined,
-				finishSendOnly: finishSend || undefined,
+				expectedRevision: requireFlag(args, "revision"),
 			});
 			emit(args, result, () =>
 				result.state === "nothing_to_publish"
 					? "nothing to publish (working tree clean)"
 					: `published ${result.commit} (change ${result.changeId}) -> ${result.pushedTo}`,
+			);
+			return 0;
+		}
+		case "finish-send": {
+			const db = RepositoryDb.open(mountPath(args));
+			const result = await db.finishSend({ expectedHead: requireFlag(args, "head") });
+			emit(args, result, () =>
+				result.state === "nothing_to_publish"
+					? "nothing to send (the remote already has this commit)"
+					: `sent ${result.commit} -> ${result.pushedTo}`,
 			);
 			return 0;
 		}
@@ -233,7 +229,15 @@ async function main(argv: string[]): Promise<number> {
 				includeInputChanges: args.flags.get("inputs") === true,
 			});
 			emit(args, snapshot, () => {
-				if (snapshot.resources.length === 0) return "no draft changes to review";
+				const identity = [
+					// From the snapshot, so they describe exactly these resources:
+					// publish takes the revision, finish-send takes the head.
+					`draft revision: ${snapshot.draftRevision}`,
+					`head: ${snapshot.head ?? "none"}`,
+				];
+				if (snapshot.resources.length === 0) {
+					return ["no draft changes to review", ...identity].join("\n");
+				}
 				const owner = db.draftOwner();
 				const lines = snapshot.resources.map((resource) => {
 					const change = resource.changes[0];
@@ -252,8 +256,7 @@ async function main(argv: string[]): Promise<number> {
 				});
 				return [
 					owner ? `draft started by: ${owner.actor}` : "draft started by: unknown",
-					// From the snapshot, so it describes exactly these resources.
-					`draft revision: ${snapshot.draftRevision}`,
+					...identity,
 					`publish readiness: ${snapshot.publishReadiness.state}`,
 					...lines,
 				].join("\n");
@@ -326,7 +329,7 @@ async function main(argv: string[]): Promise<number> {
 			const db = RepositoryDb.open(mountPath(args));
 			if (args.flags.get("abort") === true) {
 				db.abortConflict();
-				console.log("conflict aborted; data repository restored to the pre-publish state");
+				console.log("conflict aborted; commits that could not be sent are back in the draft");
 				return 0;
 			}
 			if (args.flags.get("resolved") === true) {

@@ -232,7 +232,7 @@ export function deriveDraftPanel(
 			actions: applyCapabilities([
 				{
 					kind: "abort_conflict",
-					label: "Zrušit a vrátit rozpracované změny",
+					label: "Zrušit odeslání, změny nechat rozpracované",
 					enabled: true,
 					destructive: true,
 				},

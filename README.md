@@ -23,14 +23,18 @@ through a zod-compatible parser contract; the engine itself depends only on
   worktree; the repo's default branch tracks the current generation.
 - **Draft** — an uncommitted change in the data repo working tree. Reads and
   writes are plain filesystem operations; nothing commits on keypress.
-- **Publish** — one explicit action turning the current draft batch into a
+- **Publish** — one explicit action turning the confirmed draft revision into a
   single audited commit:
-  `validate → materialize generated → rebase already-fetched origin/<branch>
-  with autostash → one commit with Repository-Db-* trailers → push`.
-- **Conflict** — any rebase/merge stop or conflicted autostash apply. The
-  engine records a conflict state with an agent handoff and refuses further
-  writes and publishes until an explicit `conflict --resolved` or
-  `conflict --abort`.
+  `validate → materialize generated → one commit with Repository-Db-* trailers
+  → send`. Sending replays the commit onto a moved remote in a temporary
+  worktree, never in the checkout, then pushes. A failed push leaves the commit
+  waiting; `finishSend` sends exactly that commit and never makes a new one.
+- **Conflict** — a send whose commits cannot be replayed onto the remote, or a
+  rebase/merge someone left in progress. The engine records it with a handoff
+  and refuses further writes and publishes until `conflict --abort` (the unsent
+  commits return to the draft) or `conflict --resolved`.
+- **Record revision** — a save carries the revision of the record version it
+  was edited from and is refused if someone saved that record meanwhile.
 
 ## Sync states
 

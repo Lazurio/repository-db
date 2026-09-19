@@ -22,7 +22,7 @@ A person must be able to answer four questions without opening Git:
 3. **Where did the change come from?** — the app, an agent, or not known.
 4. **How do I take back something I did not want?**
 
-## Six rules
+## Seven rules
 
 These govern everything below. Where an older plan says otherwise, these win.
 
@@ -48,14 +48,21 @@ These govern everything below. Where an older plan says otherwise, these win.
    only then is the smallest unification path assessed, and only if it preserves
    Mission Control's existing guarantees. A consistent look is not a reason to
    rewrite a data model.
+7. **People working in the same app instance never overwrite each other
+   silently.** Different records can be edited at the same time. A save of a
+   record someone else saved in the meantime is refused; the person keeps what
+   they typed and gets a clear choice. The saved shared draft is visible to the
+   others before publish, and an update from the server never replaces a form
+   someone is typing into. Publish still confirms the whole, specific draft.
 
 ## Vocabulary
 
 | Term | Meaning |
 | --- | --- |
 | **Draft** | All uncommitted changes in the mounted data checkout. One shared unit. |
-| **Draft revision** | Identity of the draft as displayed; a confirmation is bound to it. |
+| **Draft revision** | Identity of the whole draft as displayed; a publish or discard is bound to it. |
 | **Record** | One canonical data file, shown by its business label. |
+| **Record revision** | Identity of one stored record; a save is bound to the version it was edited from. |
 | **Origin** | Where a change came from: `app`, `agent` or `unknown`. Information only. |
 | **Publish** | The one explicit action turning the whole draft into a validated, audited commit and pushing it. The Principal's act. |
 | **Discard** | Returning one record, or the whole draft, to the published state. |
@@ -128,39 +135,73 @@ A record revert is **not offered** when:
 `canRevertRecord()` answers this before the UI draws a button, so a user is never
 offered an action that then refuses.
 
-### `publish({ actor, source, expectedRevision })`
+### The publish lifecycle — one owner
 
-Unchanged in its guarantees (validate → materialize → rebase → one audited commit
-→ push), plus the revision check. The whole draft goes out as one commit.
+The engine owns the whole lifecycle; a host app does not orchestrate commits,
+integration, resets or pushes of its own. Every step below runs inside the
+shared gate.
 
-The confirmation is checked **twice**: the full revision when the lock is taken,
-and the canonical draft content again immediately before staging. The second
-check matters because validate, materialize and integration all run in between,
-with commands and network waits during which a write could land.
+| Operation | Takes | Does | Never |
+| --- | --- | --- | --- |
+| `publish` | the draft revision that was shown (required) | checks it, validates, materializes generated output, makes one audited commit, sends | publishes a draft other than the confirmed one |
+| `finishSend` | the head of the commit shown as waiting (required) | checks it and that no new draft exists, sends | makes a commit, validates, materializes or repairs anything |
+| `pull` | — | fast-forwards to colleagues' published work | merges into local work |
 
-The second measure deliberately excludes generated output and is captured after
-publish's own repair steps: materializing a rollup is publishing doing its job,
-and treating it as somebody else's write would make a correct publish refuse
-itself.
+**Sending** fetches first. When a colleague published in the meantime, the local
+commits are replayed onto their work in a **separate temporary worktree**; the
+checkout moves to the result only if that succeeded, and with `reset --keep`,
+which refuses rather than erases anything unexpected. The checkout is never left
+mid-rebase. A replayed waiting commit keeps its content and message and gets a
+new parent; finishing a send never adds a commit.
 
-### Finishing a send
+A **push that fails** after the commit leaves that commit waiting (rule 5). The
+next step is `finishSend` with the head the review showed. `publish` with no new
+draft refuses and points there.
 
-A publish that commits but fails to push leaves an unsent commit. Finishing that
-send is its own operation, not a publish: `finishSendOnly` with the
-`expectedHead` the review showed. It refuses when any draft change exists,
-because otherwise a failed push becomes a way to publish unreviewed work with
-one click.
+**A conflict** while replaying — someone changed the same files — stops the
+send, records the conflict with the files involved, and blocks further writes
+and publishes. The checkout is untouched. **Abort** returns the commits that
+could not be sent to the draft, unchanged on disk; the user reverts or adjusts
+the conflicting records and publishes again. **Resolved** is for someone who
+integrated by hand.
+
+`pull` never creates a conflict: Git carries a draft across a fast-forward and
+refuses when an incoming change touches a file the draft also changed. It also
+refuses while a commit is waiting — finishing the send integrates instead.
+
+### Record revisions — saves in a shared app instance
+
+Several people can work in one running app on the same shared draft. Their
+saves must not overwrite each other silently, and must not block each other
+either. That is a per-record question, so it has its own revision, separate from
+the draft revision:
+
+- `recordRevision(file)` is a hash of the record file as stored, `null` when it
+  does not exist;
+- a client keeps the revision of the version it started editing from and sends
+  it with every save; `Collection.put/remove` and `writeRecordDraft` (for layouts
+  a collection does not describe) check it and write **under the shared gate**,
+  so no supported write fits between the check and the write;
+- a mismatch is refused with `record_changed` and the current revision. Nothing
+  is written. `null` means "must not exist yet", so two people creating the same
+  record cannot both win;
+- after a successful save the client continues from the returned revision. It
+  never takes a newer revision on its own and re-sends an old whole record with
+  it — overwriting is a decision the person makes on the version that is there.
+
+Saving one record never depends on another record. The draft revision is not
+used for saves: with it, a colleague's change to a different deal would refuse
+your save for no reason.
 
 ### What the confirmation covers
 
 The guarantee is **the shared gate**, and it holds for writers that pass through
-it. Everything else is detected on a best-effort basis, not guaranteed.
+it.
 
-| Writer | Held back for the whole publish / discard / integration |
+| Writer | Held back during publish / finish / pull / discard |
 | --- | --- |
-| `Collection.put` / `remove` | yes — the shared gate |
+| `Collection.put` / `remove`, `writeRecordDraft` | yes — the shared gate |
 | the CLI's own writes | yes — the same gate |
-| a host app's publish, finish-send and pull paths | yes, when the host holds the gate for its whole critical section (Deals does) |
 | any other direct filesystem write | **no** |
 
 The gate is the publish lock itself, not a second mechanism. A supported write
@@ -190,35 +231,27 @@ Two limits remain, stated rather than hidden:
 The pilot runs each data checkout on a single machine, where the first does not
 arise and the second needs an unlikely coincidence.
 
-For writes **outside** the gate the engine promises less, and says so:
-
-- publish compares the canonical draft content once more just before staging,
-  so such a write landing earlier in the publish usually makes it stop;
-- but a write landing between that comparison and the staging itself can still
-  be included, and a write to a **generated** path is not covered by the
-  comparison at all, because materializing rewrites generated output by design.
-
-A one-shot content comparison cannot turn an ungated writer into a safe one. A
-process that writes the data checkout directly — a script, an editor, an agent
-not using the CLI — is responsible for not doing so while a publish runs. The
-supported way for an agent to write is the CLI or the collection API, which
-pass through the gate.
+A process that writes the data checkout directly — a script, an editor, an
+agent not using the CLI — is not held back and is responsible for not doing so
+while a publish runs; such a write can end up in a publish nobody reviewed.
+There is no second content check to catch it: a check-and-hope comparison would
+promise more than it can keep. Generated output belongs to its materializer,
+which runs inside publish.
 
 ### CLI parity
 
 ```bash
-repository-db review  [--json]                      # prints the draft revision
+repository-db review  [--json]              # prints the draft revision and head
 repository-db discard (--record <path> | --draft) [--revision <draft-revision>]
 repository-db origin  --path <p>... --kind app|agent --actor <actor>
-repository-db publish --actor "…" --source "…" [--revision <draft-revision>]
-repository-db publish --finish-send --head <sha> --actor "…" --source "…"
+repository-db publish --revision <draft-revision> --actor "…" --source "…"
+repository-db finish-send --head <sha>
+repository-db sync --pull                   # fast-forward only
 ```
 
-Finishing a send always names the commit it finishes: `--finish-send` without
-`--head` is refused before anything is fetched, locked or pushed.
-
-A revision supplied to the CLI is a confirmation of a specific draft and is
-enforced; omitting it means "act on the draft as it stands right now".
+Publish requires the revision and finish-send the head; both are refused before
+anything is fetched, locked or pushed when they are missing. For discard, an
+omitted revision means "the draft as it stands right now".
 
 ## Host API convention
 
@@ -227,7 +260,8 @@ enforced; omitting it means "act on the draft as it stands right now".
 | `GET /api/<app>/draft/status` | card state, counts, draft revision |
 | `GET /api/<app>/draft/review` | resources, field diffs, origins, revision |
 | `POST /api/<app>/draft/discard` | `{ scope, expectedRevision }` |
-| `POST /api/<app>/draft/publish` | `{ expectedRevision }` |
+| `POST /api/<app>/draft/publish` | `{ expectedRevision }`, or `{ finishSend: true, expectedHead }` to finish a send |
+| record writes | carry the `baseRevision` of the version edited; a stale one is refused with the current revision |
 | `GET /api/<app>/draft/events` | SSE: draft changed, conflict, remote pulled |
 
 A stale revision returns a conflict response carrying the current one, so the
@@ -262,7 +296,9 @@ disclosure. Inline marks in list and detail screens use the same resource ids.
 - reverting one record (one canonical file) or the whole draft;
 - confirmation bound to the displayed revision, for publish and discard;
 - origin shown as app / agent / unknown;
-- unsent commits and conflicts as distinct, clearly explained states.
+- unsent commits and conflicts as distinct, clearly explained states;
+- several people in one app instance: different records in parallel, a stale
+  save of the same record refused without losing what was typed.
 
 **Not supported yet — deliberately**
 
@@ -272,6 +308,8 @@ disclosure. Inline marks in list and detail screens use the same resource ids.
 - reverting a record spanning several files, or one involved in a rename;
 - reverting a record while generated data is in the draft;
 - reviewed-state persistence and approval workflows;
+- collaboration across machines or offline, automatic field merge, shared
+  cursors or CRDTs — a stale save is refused and the person decides;
 - Mission Control's changeset model — see rule 6.
 
 ## Relation to earlier plans

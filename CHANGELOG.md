@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+- **The engine owns the whole publish lifecycle.** `publish` confirms the draft
+  revision, validates, materializes, commits and sends. Sending replays onto a
+  moved remote in a temporary worktree — never in the checkout, which moves
+  only by `reset --keep` after success — then pushes. A replay conflict is
+  recorded with the files involved; `abortConflict` returns the unsent commits
+  to the draft. The autostash machinery, the second pre-staging content check
+  (`computeCanonicalContentHash`) and the legacy `.gitignore` repair are gone;
+  the engine layer is simply never staged.
+- **Breaking:** `publish` requires `expectedRevision`. A caller with nothing
+  displayed passes `db.draftRevision()`. `finishSendOnly`/`expectedHead` are
+  replaced by a separate `finishSend({ expectedHead })`, which never commits,
+  validates, materializes or repairs. `publish` with no new draft but a waiting
+  commit refuses with `send_pending` instead of pushing it. CLI: `publish`
+  needs `--revision`; `finish-send --head <sha>` replaces
+  `publish --finish-send`.
+- **Breaking:** `pull` / `sync --pull` only fast-forwards. A draft may stay in
+  place; when an incoming change touches a drafted file the pull is refused
+  (`pull_blocked_by_draft`) and nothing moves. With a commit waiting it refuses
+  with `send_pending`. `PullResult` and `PublishResult` report `remoteChanges`.
+- **Record revisions.** `recordRevision(file)`, `Collection.revision(id)`, and a
+  `baseRevision` option on `Collection.put/remove` and the new
+  `writeRecordDraft` (for layouts a collection does not describe): the version
+  check and the write run under the shared gate; a stale save fails with
+  `RecordChangedError` (`record_changed`) carrying the current revision.
+  `put` now returns the new revision.
+- Consumers pinned to earlier commits (Warehouse, General, Lumbio apps) keep
+  working until they bump; a bump needs the revision on `publish` and
+  `finishSend` for push recovery.
+
 - Finishing a send skips the legacy-lock repair as well and refuses, rather
   than making a commit, if anything dirtied the tree after its first check.
   The card keys field rows by path, since labels repeat across nested fields.

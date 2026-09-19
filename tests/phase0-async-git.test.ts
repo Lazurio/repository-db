@@ -35,7 +35,7 @@ describe("phase 0: lock-free read-only fetch", () => {
 				// behind there is no integration, so this must not raise
 				// PublishLockedError.
 				const result = await db.pull();
-				expect(result).toEqual({ state: "up_to_date", behind: 0 });
+				expect(result).toEqual({ state: "up_to_date", behind: 0, remoteChanges: [] });
 			} finally {
 				release();
 			}
@@ -106,7 +106,11 @@ fi
 			process.env.PHASE0_PULL_GIT_LOG = logPath;
 
 			const result = await db.pull();
-			expect(result).toEqual({ state: "pulled", behind: 1 });
+			expect(result).toEqual({
+				state: "pulled",
+				behind: 1,
+				remoteChanges: ["data/things/thing-remote.yaml"],
+			});
 			const networkOps = readFileSync(logPath, "utf8").trim().split(/\n+/).filter(Boolean);
 			expect(networkOps).toEqual(["fetch"]);
 		} finally {

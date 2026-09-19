@@ -1,10 +1,8 @@
 import { createHash } from "node:crypto";
 import { lstatSync, readFileSync, readlinkSync } from "node:fs";
 import path from "node:path";
-import { isPathDeclared } from "./generated.ts";
 import { gitDirtyPaths, gitHeadCommit, gitRenameSources } from "./git.ts";
 import { ENGINE_DIR } from "./lock.ts";
-import type { RepositoryDbConfig } from "./types.ts";
 
 /**
  * Draft revision — the identity of "the draft as it was shown".
@@ -13,14 +11,14 @@ import type { RepositoryDbConfig } from "./types.ts";
  * carries this value and the panel hands it back when publishing or discarding;
  * if the draft moved in between, the operation does not run.
  *
- * The value has two parts, `draft:<baseline>.<content>`, because they answer
- * two different questions and integration changes only one of them:
+ * The value has two parts, `draft:<baseline>.<content>`:
  *
  *   - `baseline` — which commit the draft sits on. Changes when a colleague's
  *     work is pulled in, which invalidates the review the user read.
- *   - `content`  — what is actually in the working tree right now. This is what
- *     publish stages, so it is re-checked immediately before staging, after
- *     integration has moved the baseline.
+ *   - `content`  — what is in the working tree right now: exactly what publish
+ *     commits. Publish compares the whole revision once, inside the shared
+ *     gate, and keeps the gate until the commit is made, so no supported
+ *     write can change the draft in between.
  *
  * The content hash covers the file mode too: a `chmod +x` is a real change to
  * what would be published, and hashing bytes alone would let it ride along
@@ -83,11 +81,10 @@ function contentHash(mountRoot: string, dirtyPaths: readonly string[]): string {
 /**
  * Every path the draft touches, independent of how Git happens to split it.
  *
- * A staged rename is one entry reported by its new path; the same change after
- * an autostash apply is a staged add plus an unstaged delete. Hashing Git's
- * report as-is would make the two look like different drafts — and publish,
- * which integrates between its two checks, would refuse its own confirmed
- * draft. Adding rename sources makes both shapes the same set of paths.
+ * A staged rename is one entry reported by its new path; the same change
+ * unstaged is an add plus a delete. Hashing Git's report as-is would make one
+ * draft look like two different ones depending on the index. Adding rename
+ * sources makes both shapes the same set of paths.
  */
 function draftPaths(mountRoot: string): string[] {
 	return [
@@ -122,29 +119,4 @@ export function parseDraftRevision(revision: string): DraftRevisionParts {
 	const separator = rest.indexOf(".");
 	if (separator === -1) return { baseline: "", content: "" };
 	return { baseline: rest.slice(0, separator), content: rest.slice(separator + 1) };
-}
-
-/**
- * Fingerprint of the canonical draft content — everything dirty except
- * generated output.
- *
- * This is what publish compares before staging. It cannot be derived from the
- * revision, because publishing legitimately rewrites generated artifacts on the
- * way: materializing a rollup would otherwise look exactly like a colleague's
- * write and make a correct publish refuse itself. So publish captures this
- * fingerprint right after the confirmation and compares the same measure again
- * at the moment it stages.
- */
-export function computeCanonicalContentHash(
-	mountRoot: string,
-	config: RepositoryDbConfig,
-): string {
-	const generatedPrefix = `${config.layout.generated}/`;
-	const dirtyPaths = draftPaths(mountRoot)
-		.filter((entry) => entry !== config.layout.generated)
-		.filter((entry) => !entry.startsWith(generatedPrefix))
-		// A declared artifact may live outside the generated layout; its
-		// materializer rewrites it just the same.
-		.filter((entry) => !isPathDeclared(entry, config));
-	return contentHash(mountRoot, dirtyPaths);
 }

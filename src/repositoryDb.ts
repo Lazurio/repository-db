@@ -26,7 +26,7 @@ import {
 import { type ReviewOptions, computeReviewSnapshot } from "./review.ts";
 import { gitFetchAsync } from "./git.ts";
 import { runValidateCommands } from "./generated.ts";
-import { publish, pullRemote, type PullResult } from "./publish.ts";
+import { finishSend, publish, pullRemote, type PullResult } from "./publish.ts";
 import {
 	deriveSyncStatus,
 	deriveSyncStatusAsync,
@@ -34,6 +34,7 @@ import {
 } from "./status.ts";
 import type {
 	ConflictState,
+	FinishSendOptions,
 	ReviewSurfaceSnapshot,
 	PublishOptions,
 	PublishResult,
@@ -89,11 +90,17 @@ export class RepositoryDb {
 		return runValidateCommands(this.mountRoot, this.config);
 	}
 
+	/** Publish the confirmed draft revision as one commit and send it. */
 	publish(options: PublishOptions): Promise<PublishResult> {
 		return publish(this.mountRoot, this.config, options);
 	}
 
-	/** Fetch + integrate remote changes (autostash-safe, conflict-guarded). */
+	/** Send the commit shown as waiting; never makes a commit of its own. */
+	finishSend(options: FinishSendOptions): Promise<PublishResult> {
+		return finishSend(this.mountRoot, this.config, options);
+	}
+
+	/** Fast-forward to colleagues' published work; never merges into local work. */
 	pull(): Promise<PullResult> {
 		return pullRemote(this.mountRoot, this.config);
 	}
@@ -159,8 +166,9 @@ export class RepositoryDb {
 		return activeConflict(this.mountRoot);
 	}
 
+	/** Leave the conflict; commits that could not be sent return to the draft. */
 	abortConflict(): void {
-		abortConflict(this.mountRoot);
+		abortConflict(this.mountRoot, this.config.dataRepo.branch);
 	}
 
 	markConflictResolved(): void {

@@ -227,7 +227,7 @@ describe("credential preflight", () => {
 				import { RepositoryDb } from "./src/repositoryDb.ts";
 				const db = RepositoryDb.open(process.argv[1]);
 				try {
-					await db.publish({ actor: "a <a@a>", source: "test" });
+					await db.publish({ actor: "a <a@a>", source: "test", expectedRevision: db.draftRevision() });
 					console.error("publish unexpectedly succeeded");
 					process.exit(10);
 				} catch (error) {

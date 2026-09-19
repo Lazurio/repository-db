@@ -298,7 +298,7 @@ export function DraftPublishPanel({
 				if (
 					typeof window !== "undefined" &&
 					!window.confirm(
-						"Zrušit probíhající synchronizaci a vrátit rozpracované změny? Publikovaná data na serveru zůstanou beze změny.",
+						"Zrušit odeslání? Vaše změny zůstanou rozpracované a nic se nesmaže. Konfliktní záznamy pak vraťte nebo upravte a publikujte znovu.",
 					)
 				) {
 					return;

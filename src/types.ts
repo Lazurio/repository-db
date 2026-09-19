@@ -450,23 +450,11 @@ export interface PublishOptions {
 	/** Human actor recorded in the commit trailers, e.g. `Jana <jana@firma.cz>`. */
 	actor: string;
 	/**
-	 * Revision of the draft the user confirmed. When present, publish runs only
-	 * if the draft still looks exactly like that — checked when the lock is
-	 * taken and again immediately before staging. A headless caller with
-	 * nothing displayed may omit it.
+	 * Revision of the draft being confirmed. Publish runs only if the draft is
+	 * still exactly that version when the shared gate is taken. A caller with
+	 * nothing displayed confirms what is there by passing `draftRevision()`.
 	 */
-	expectedRevision?: string;
-	/**
-	 * Commit the caller expects to find. Used when finishing a send: the push
-	 * must carry the exact commit that was shown, not whatever HEAD became.
-	 */
-	expectedHead?: string;
-	/**
-	 * Finish sending an existing commit and nothing more. Refuses when draft
-	 * changes exist, so a failed push cannot become a way to publish unreviewed
-	 * work.
-	 */
-	finishSendOnly?: boolean;
+	expectedRevision: string;
 	/** Producing surface, e.g. `sample-app-v1` or `repository-db-cli`. */
 	source: string;
 	/** Optional human summary used as the first commit-message line. */
@@ -479,12 +467,25 @@ export interface PublishOptions {
 	skipMaterialize?: boolean;
 }
 
+export interface FinishSendOptions {
+	/**
+	 * The commit waiting to be sent, as it was shown. Finishing a send pushes
+	 * exactly the commits up to this one and never makes a new commit.
+	 */
+	expectedHead: string;
+}
+
 export interface PublishResult {
 	/** `published` on success. */
 	state: "published" | "nothing_to_publish";
 	commit?: string;
 	changeId?: string;
 	pushedTo?: string;
+	/**
+	 * Paths a colleague had published in the meantime that this send
+	 * integrated under the local work. Empty when the remote had not moved.
+	 */
+	remoteChanges?: string[];
 }
 
 export interface ConflictState {
@@ -494,10 +495,8 @@ export interface ConflictState {
 	gitState: string;
 	message: string;
 	handoff: string;
-	/** HEAD commit before the failed operation; used by safe abort/recovery. */
-	preOperationHead?: string;
-	/** Commit of the autostash holding the local draft, when one exists. */
-	autostashSha?: string;
+	/** Files both sides changed, when the engine knows them. */
+	paths?: string[];
 }
 
 export class RepositoryDbError extends Error {
@@ -521,6 +520,21 @@ export class ConflictActiveError extends RepositoryDbError {
 	constructor(message: string) {
 		super("conflict_active", message);
 		this.name = "ConflictActiveError";
+	}
+}
+
+/**
+ * A record write whose base revision is no longer what is stored: someone saved
+ * the same record in the meantime. The write was not applied.
+ */
+export class RecordChangedError extends RepositoryDbError {
+	/** Revision stored now; `null` when the record no longer exists. */
+	readonly currentRevision: string | null;
+
+	constructor(message: string, currentRevision: string | null) {
+		super("record_changed", message);
+		this.name = "RecordChangedError";
+		this.currentRevision = currentRevision;
 	}
 }
 

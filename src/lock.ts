@@ -217,7 +217,7 @@ export function acquirePublishLock(mountRoot: string): () => void {
  * This is the same lock publish and discard hold — not a second mechanism. It
  * is what makes "the draft I confirmed is the draft I published" true for
  * writes the engine knows about: a `Collection` write or a CLI write cannot
- * land inside a publish's validate-integrate-stage window, or between a
+ * land between a publish's revision check and its push, or between a
  * discard's revision check and its cleanup.
  *
  * It fails immediately rather than waiting. Waiting would be worse than
@@ -226,10 +226,11 @@ export function acquirePublishLock(mountRoot: string): () => void {
  * publish and release the lock — the write would stall the server and then fail
  * anyway. A caller that wants to retry can do so where it can actually await.
  *
- * The contract is deliberately narrow. A process that writes the data checkout
- * directly, without this gate, is not held back by it; for those, the content
- * check before staging is the backstop that makes publish refuse rather than
- * quietly include the write.
+ * The contract is deliberately narrow. It covers writes that go through the
+ * engine ({@link writeRecordDraft}, `Collection.put/remove`, the CLI). A
+ * process that writes the data checkout directly bypasses it and is not
+ * protected: such a write can end up in a publish the user did not review.
+ * Generated output is the materializer's, which runs inside publish.
  */
 export function withDraftWriteLock<T>(mountRoot: string, write: () => T): T {
 	let release: () => void;
