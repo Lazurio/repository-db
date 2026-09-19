@@ -168,6 +168,15 @@ takes it briefly and fails immediately if a publish, discard or integration
 holds it, rather than waiting — a host runs publish on the same thread, so
 waiting would stall the very operation the write is waiting for.
 
+A lock is taken over only when its holder is provably gone. On the same machine
+that means the holding process is no longer running; a running holder keeps the
+gate however long it takes. A lock written by **another host** cannot be checked
+from here, so it is treated as abandoned after 15 minutes. That is the one
+remaining limit of the gate: two machines sharing one data checkout could
+overlap after a publish on the other machine has run for more than 15 minutes.
+The pilot runs each data checkout on a single machine, where this does not
+arise.
+
 For writes **outside** the gate the engine promises less, and says so:
 
 - publish compares the canonical draft content once more just before staging,

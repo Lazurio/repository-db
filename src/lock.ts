@@ -7,7 +7,10 @@ import { PublishLockedError, RepositoryDbError } from "./types.ts";
 export const ENGINE_DIR = ".repository-db";
 const LOCK_FILE = "publish.lock";
 
-/** Locks older than this are considered stale even if the pid check is inconclusive. */
+/**
+ * A lock from another host older than this is considered stale: that host's
+ * process cannot be checked from here. Never applied to a local lock.
+ */
 const STALE_LOCK_MS = 15 * 60 * 1000;
 
 interface LockPayload {
@@ -55,9 +58,14 @@ export function acquirePublishLock(mountRoot: string): () => void {
 	if (existing) {
 		const sameHost = existing.hostname === os.hostname();
 		const age = Date.now() - Date.parse(existing.acquiredAt);
-		const stale =
-			(sameHost && !isProcessAlive(existing.pid)) ||
-			(Number.isFinite(age) && age > STALE_LOCK_MS);
+		// On this machine liveness is provable, so it is the only test: a lock
+		// held by a process that is still running is never taken over, however
+		// old it is. Taking it by age would open the shared write gate in the
+		// middle of a long publish. Age decides only for a lock from another
+		// host, whose process cannot be checked from here.
+		const stale = sameHost
+			? !isProcessAlive(existing.pid)
+			: Number.isFinite(age) && age > STALE_LOCK_MS;
 		if (!stale) {
 			throw new PublishLockedError(
 				`publish is already running (pid ${existing.pid} on ${existing.hostname}, since ${existing.acquiredAt}); ` +

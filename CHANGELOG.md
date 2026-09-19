@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- A lock held by a running process on this machine is never taken over,
+  however old it is; only a dead local holder or a lock from another host older
+  than 15 minutes is reclaimed. Previously any lock past 15 minutes could be
+  taken, which would open the write gate in the middle of a long publish. The
+  standard names the remaining cross-host limit explicitly.
+
 - Review lists both sides of a rename — staged or committed but unsent — so the
   deleted source record is shown before publish removes it.
 - The pre-staging comparison also excludes declared generated artifacts that

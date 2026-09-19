@@ -674,3 +674,75 @@ describe("round 2 — declared artifacts outside generated/ do not trip the chec
 		}
 	});
 });
+
+describe("round 3 — a live local lock is never taken over by age", () => {
+	function writeLock(mountPath: string, payload: Record<string, unknown>): string {
+		const lockFile = path.join(mountPath, ".repository-db", "publish.lock");
+		mkdirSync(path.dirname(lockFile), { recursive: true });
+		writeFileSync(lockFile, JSON.stringify(payload), "utf8");
+		return lockFile;
+	}
+
+	test("an hour-old lock of a running local process still holds the gate", async () => {
+		const os = await import("node:os");
+		const fixture = createFixtureRepo();
+		try {
+			// This test process is alive; its lock is well past the old 15-minute cut.
+			const lockFile = writeLock(fixture.mountPath, {
+				pid: process.pid,
+				hostname: os.hostname(),
+				acquiredAt: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+				token: "long-publish",
+			});
+
+			expect(() => acquirePublishLock(fixture.mountPath)).toThrow(/already running/);
+			expect(() => withDraftWriteLock(fixture.mountPath, () => undefined)).toThrow(
+				/publish or discard is in progress/,
+			);
+			expect(JSON.parse(readFileSync(lockFile, "utf8")).token).toBe("long-publish");
+		} finally {
+			rmSync(fixture.root, { recursive: true, force: true });
+		}
+	});
+
+	test("a lock of a dead local process is reclaimed at once", async () => {
+		const os = await import("node:os");
+		const fixture = createFixtureRepo();
+		try {
+			writeLock(fixture.mountPath, {
+				pid: 2_147_483_000,
+				hostname: os.hostname(),
+				acquiredAt: new Date().toISOString(),
+				token: "crashed",
+			});
+			const release = acquirePublishLock(fixture.mountPath);
+			release();
+		} finally {
+			rmSync(fixture.root, { recursive: true, force: true });
+		}
+	});
+
+	test("another host's lock is reclaimed only once it is old", () => {
+		const fixture = createFixtureRepo();
+		try {
+			writeLock(fixture.mountPath, {
+				pid: 1,
+				hostname: "some-other-machine",
+				acquiredAt: new Date().toISOString(),
+				token: "remote-fresh",
+			});
+			expect(() => acquirePublishLock(fixture.mountPath)).toThrow(/already running/);
+
+			writeLock(fixture.mountPath, {
+				pid: 1,
+				hostname: "some-other-machine",
+				acquiredAt: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+				token: "remote-old",
+			});
+			const release = acquirePublishLock(fixture.mountPath);
+			release();
+		} finally {
+			rmSync(fixture.root, { recursive: true, force: true });
+		}
+	});
+});
