@@ -317,7 +317,7 @@ async function send(
 					paths: lane.paths,
 					...(Object.keys(unresolvedFields).length > 0 ? { unresolvedFields } : {}),
 					pendingHead: head,
-					retryable: true,
+					retryable: false,
 					handoff: laneConflictHandoff(mountRoot, branch),
 				});
 				throw new RepositoryDbError("publish_conflict", `${state.message}\n\n${state.handoff}`);
