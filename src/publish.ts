@@ -2,7 +2,12 @@ import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { assertDataRepoBoundary } from "./boundary.ts";
-import { assertNoActiveConflict, writeConflictState } from "./conflict.ts";
+import {
+	assertNoActiveConflict,
+	clearRecordedConflictState,
+	readConflictState,
+	writeConflictState,
+} from "./conflict.ts";
 import { assertCredentials } from "./credentials.ts";
 import { DraftChangedError } from "./discard.ts";
 import { computeDraftRevision } from "./draftRevision.ts";
@@ -26,12 +31,15 @@ import {
 } from "./generated.ts";
 import { ENGINE_DIR, acquirePublishLock } from "./lock.ts";
 import { clearDraftProvenance } from "./origin.ts";
+import { mergeCanonicalYamlThreeWay } from "./semanticYamlMerge.ts";
 import { buildCommitMessage, newChangeId } from "./trailers.ts";
+import { writeFileAtomic } from "./yamlIo.ts";
 import {
 	type FinishSendOptions,
 	type PublishOptions,
 	type PublishResult,
 	type RepositoryDbConfig,
+	type RetryConflictSendOptions,
 	RepositoryDbError,
 } from "./types.ts";
 
@@ -90,33 +98,129 @@ function gated<T>(mountRoot: string, run: () => Promise<T>): Promise<T> {
 	return run().finally(release);
 }
 
+type LaneConflictDetail = {
+	path: string;
+	unresolvedFields?: string[];
+	reason?: string;
+};
+
 type LaneResult =
 	| { ok: true; head: string }
-	| { ok: false; paths: string[]; detail: string };
+	| { ok: false; paths: string[]; detail: string; conflicts: LaneConflictDetail[] };
+
+function isCanonicalDataYamlPath(config: RepositoryDbConfig, relativePath: string): boolean {
+	const prefix = `${config.layout.data}/`;
+	return relativePath.startsWith(prefix) && /\.ya?ml$/i.test(relativePath);
+}
+
+function laneAbsolutePath(laneRoot: string, relativePath: string): string | undefined {
+	if (path.isAbsolute(relativePath) || relativePath.split("/").includes("..")) return undefined;
+	const resolved = path.resolve(laneRoot, relativePath);
+	return resolved.startsWith(`${laneRoot}${path.sep}`) ? resolved : undefined;
+}
+
+function laneStageText(laneRoot: string, stage: 1 | 2 | 3, relativePath: string): string | undefined {
+	const result = runGit(laneRoot, ["show", `:${stage}:${relativePath}`]);
+	return result.status === 0 ? result.stdout : undefined;
+}
+
+/**
+ * Git has already proved a text-level conflict in the isolated lane. Try only
+ * canonical YAML data files and stage a result only when the structural merger
+ * proves every business value safe. Any other path stays a hard conflict.
+ */
+function resolveSemanticLaneConflicts(
+	laneRoot: string,
+	config: RepositoryDbConfig,
+	paths: readonly string[],
+): { resolved: boolean; conflicts: LaneConflictDetail[] } {
+	const conflicts: LaneConflictDetail[] = [];
+	for (const relativePath of paths) {
+		if (!isCanonicalDataYamlPath(config, relativePath)) {
+			conflicts.push({ path: relativePath, reason: "path is not canonical YAML data" });
+			continue;
+		}
+		const absolutePath = laneAbsolutePath(laneRoot, relativePath);
+		if (!absolutePath) {
+			conflicts.push({ path: relativePath, reason: "path escapes the integration lane" });
+			continue;
+		}
+		// During `git rebase <remote>`, stage 2 is the remote target and stage 3
+		// is the local commit being replayed. Stage 1 is their merge base.
+		const merged = mergeCanonicalYamlThreeWay(
+			laneStageText(laneRoot, 1, relativePath),
+			laneStageText(laneRoot, 3, relativePath),
+			laneStageText(laneRoot, 2, relativePath),
+		);
+		if (!merged.ok || !merged.text) {
+			conflicts.push({
+				path: relativePath,
+				...(merged.unresolvedPaths.length > 0
+					? { unresolvedFields: merged.unresolvedPaths }
+					: {}),
+				...(merged.reason ? { reason: merged.reason } : {}),
+			});
+			continue;
+		}
+		writeFileAtomic(absolutePath, merged.text);
+		const add = runGit(laneRoot, ["add", "--", relativePath]);
+		if (add.status !== 0) {
+			conflicts.push({
+				path: relativePath,
+				reason: add.stderr.trim() || add.stdout.trim() || "could not stage semantic merge",
+			});
+		}
+	}
+	return { resolved: conflicts.length === 0, conflicts };
+}
 
 /**
  * Replay the local commits onto the fetched remote in a throwaway worktree.
- * Whatever happens there, the live checkout is untouched.
+ * Whatever happens there, the live checkout is untouched. Git first tries its
+ * normal merge; only text-conflicted canonical YAML gets a conservative
+ * structural merge before the rebase is continued.
  */
 async function rebaseInLane(
 	mountRoot: string,
 	start: string,
 	onto: string,
+	config: RepositoryDbConfig,
 ): Promise<LaneResult> {
 	const parent = mkdtempSync(path.join(os.tmpdir(), "repository-db-lane-"));
 	const laneRoot = path.join(parent, "lane");
 	try {
 		runGitOrThrow(mountRoot, ["worktree", "add", "--detach", laneRoot, start]);
-		const rebase = await runGitAsync(laneRoot, ["rebase", onto]);
-		const unmerged = gitUnmergedPaths(laneRoot);
-		if (rebase.status !== 0 || unmerged.length > 0) {
-			return {
-				ok: false,
-				paths: unmerged,
-				detail: rebase.stderr.trim() || rebase.stdout.trim(),
-			};
+		let rebase = await runGitAsync(laneRoot, ["rebase", onto]);
+		for (let attempts = 0; attempts < 64; attempts += 1) {
+			const unmerged = gitUnmergedPaths(laneRoot);
+			if (rebase.status === 0 && unmerged.length === 0) {
+				return { ok: true, head: gitHeadCommit(laneRoot) ?? start };
+			}
+			if (unmerged.length === 0) {
+				return {
+					ok: false,
+					paths: [],
+					detail: rebase.stderr.trim() || rebase.stdout.trim() || "rebase stopped",
+					conflicts: [],
+				};
+			}
+			const semantic = resolveSemanticLaneConflicts(laneRoot, config, unmerged);
+			if (!semantic.resolved) {
+				return {
+					ok: false,
+					paths: unmerged,
+					detail: rebase.stderr.trim() || rebase.stdout.trim() || "rebase stopped",
+					conflicts: semantic.conflicts,
+				};
+			}
+			rebase = runGit(laneRoot, ["-c", "core.editor=true", "rebase", "--continue"]);
 		}
-		return { ok: true, head: gitHeadCommit(laneRoot) ?? start };
+		return {
+			ok: false,
+			paths: gitUnmergedPaths(laneRoot),
+			detail: "semantic rebase exceeded the safe continuation limit",
+			conflicts: [],
+		};
 	} finally {
 		runGit(mountRoot, ["worktree", "remove", "--force", laneRoot]);
 		rmSync(parent, { recursive: true, force: true });
@@ -126,11 +230,12 @@ async function rebaseInLane(
 
 function laneConflictHandoff(mountRoot: string, branch: string): string {
 	return [
-		"Někdo mezitím publikoval změny stejných souborů. Pracovní kopie zůstala beze změny.",
-		"a) repository-db conflict --abort vrátí čekající publikaci zpět do draftu;",
-		"   potom konfliktní záznamy vraťte, načtěte kolegovy změny a svou úpravu udělejte znovu.",
-		`b) Nebo změny začleňte ručně: cd ${mountRoot} && git rebase origin/${branch},`,
-		"   a spusťte repository-db conflict --resolved.",
+		"repository-db bezpečně neprokázal sloučení všech změn. Pracovní kopie zůstala beze změny.",
+		"a) Pokud panel nabízí bezpečný opakovaný pokus, použijte ho jen pro zobrazený čekající commit.",
+		"b) Jinak repository-db conflict --abort vrátí čekající publikaci zpět do draftu;",
+		"   potom upravte konfliktní záznam nad aktuálními kolegovými daty a publikujte znovu.",
+		`Větev ${branch} se nesmí ručně rebasovat v aktivním data mountu.`,
+		`Technický detail zůstává v ${mountRoot}/.repository-db/conflict.json.`,
 		"Do té doby repository-db odmítá zápisy i publikaci.",
 	].join("\n");
 }
@@ -195,16 +300,24 @@ async function send(
 		const behind = runGit(mountRoot, ["merge-base", "--is-ancestor", remoteHead, head]).status !== 0;
 		if (behind) {
 			remoteChanges = gitChangedPaths(mountRoot, [`${head}...${remoteHead}`]);
-			const lane = await rebaseInLane(mountRoot, head, remoteHead);
+			const lane = await rebaseInLane(mountRoot, head, remoteHead, config);
 			if (!lane.ok) {
+				const unresolvedFields = Object.fromEntries(
+					lane.conflicts
+						.filter((entry) => entry.unresolvedFields && entry.unresolvedFields.length > 0)
+						.map((entry) => [entry.path, entry.unresolvedFields ?? []]),
+				);
 				const state = writeConflictState(mountRoot, {
 					detectedAt: new Date().toISOString(),
 					operation,
 					gitState: lane.detail || "rebase stopped",
-					message: `${operation} stopped: remote changes to the same files could not be integrated (${
+					message: `${operation} stopped: remote changes could not be safely integrated (${
 						lane.paths.join(", ") || "see gitState"
 					})`,
 					paths: lane.paths,
+					...(Object.keys(unresolvedFields).length > 0 ? { unresolvedFields } : {}),
+					pendingHead: head,
+					retryable: true,
 					handoff: laneConflictHandoff(mountRoot, branch),
 				});
 				throw new RepositoryDbError("publish_conflict", `${state.message}\n\n${state.handoff}`);
@@ -351,6 +464,64 @@ export async function finishSend(
 		}
 		assertUnsentGeneratedDeclared(mountRoot, config);
 		const { pushed, remoteChanges } = await send(mountRoot, config, "finish-send");
+		if (!pushed) return { state: "nothing_to_publish", remoteChanges };
+		return {
+			state: "published",
+			commit: gitHeadCommit(mountRoot),
+			pushedTo: `${config.dataRepo.remote}#${config.dataRepo.branch}`,
+			remoteChanges,
+		};
+	});
+}
+
+/**
+ * Retry an engine-recorded send only after reconfirming the exact waiting head,
+ * a clean checkout and the absence of any external Git operation. The old
+ * conflict marker remains in place during the retry; a new failed integration
+ * replaces it, while a successful send clears it atomically at the end.
+ */
+export async function retryConflictSend(
+	mountRoot: string,
+	config: RepositoryDbConfig,
+	options: RetryConflictSendOptions,
+): Promise<PublishResult> {
+	requireText(
+		options.expectedHead,
+		"retrying a conflicted send requires the commit that was shown (expectedHead)",
+	);
+	assertDataRepoBoundary(mountRoot, config);
+	assertCredentials(config.dataRepo.remote);
+
+	return gated(mountRoot, async () => {
+		const conflict = readConflictState(mountRoot);
+		const isEngineSend = conflict?.operation === "publish" || conflict?.operation === "finish-send";
+		const isRetryable =
+			Boolean(conflict && isEngineSend && conflict.retryable) ||
+			// v3.1 conflict files did not include a pending head. Preserve a safe
+			// recovery path for them only through the exact current-head check below.
+			Boolean(conflict && isEngineSend && conflict.pendingHead === undefined);
+		if (!conflict || !isRetryable) {
+			throw new RepositoryDbError(
+				"conflict_not_retryable",
+				"Only an engine-recorded pending send can be retried. External Git conflicts must be resolved or aborted outside this API.",
+			);
+		}
+		const head = gitHeadCommit(mountRoot);
+		if (head !== options.expectedHead || (conflict.pendingHead && conflict.pendingHead !== head)) {
+			throw new RepositoryDbError(
+				"head_changed",
+				`The commit waiting to be sent is no longer the one that was shown (expected ${options.expectedHead}, found ${head ?? "none"}). Refresh and decide again.`,
+			);
+		}
+		if (engineDirFree(gitDirtyPaths(mountRoot)).length > 0) {
+			throw new RepositoryDbError(
+				"new_draft_present",
+				"There are draft changes beyond the conflicted commit. Retrying would publish work that was not part of the shown commit.",
+			);
+		}
+		assertUnsentGeneratedDeclared(mountRoot, config);
+		const { pushed, remoteChanges } = await send(mountRoot, config, "finish-send");
+		clearRecordedConflictState(mountRoot);
 		if (!pushed) return { state: "nothing_to_publish", remoteChanges };
 		return {
 			state: "published",

@@ -1,0 +1,129 @@
+{
+  "schema_version": "companiesascode.todo_tasks.v1",
+  "scope": {
+    "id": "repository-db",
+    "name": "Repository DB",
+    "path": "modules/repository-db",
+    "owner": "workspace-steward"
+  },
+  "tasks": [
+    {
+      "id": "task-2026-10-04-801",
+      "title": "Add proven YAML semantic merge and safe pending-send retry to repository-db",
+      "status": "open",
+      "priority": "urgent",
+      "priority_rank": 1,
+      "assignee": "agent",
+      "priority_decider": "henry",
+      "priority_reason": "Deals publishing is blocked by a technically false conflict and normal concurrent editing is currently unusable.",
+      "created_at": "2026-10-03",
+      "updated_at": "2026-10-03",
+      "tags": [
+        "DEV-6614",
+        "mission-control",
+        "repository-db",
+        "yaml",
+        "publish",
+        "conflict-safety"
+      ],
+      "dev_code": "DEV-6614",
+      "summary": "Implement deterministic structural merge, bounded audit metadata handling, precise conflict evidence and explicit retry for engine-recorded clean pending sends; cover safe and unsafe fixtures.",
+      "risk_notes": [
+        "No broad last-write-wins behavior may be introduced for business data."
+      ],
+      "acceptance_criteria": [
+        "Safe field-level and id-keyed-array merges send successfully without an engine conflict marker.",
+        "Every ambiguous business merge stays blocked and reports exact unresolved paths.",
+        "Retry refuses any changed pending head, dirty tree or external Git conflict."
+      ],
+      "links": [
+        {
+          "label": "Mission Control plan",
+          "path": "mission-control/plans/2026/10/DEV-6614-repository-db-semantic-publish-merge.yaml"
+        },
+        {
+          "label": "Repository DB publish lifecycle",
+          "path": "modules/repository-db/src/publish.ts"
+        },
+        {
+          "label": "Repository DB conflict state",
+          "path": "modules/repository-db/src/conflict.ts"
+        },
+        {
+          "label": "Deals v3 writer plugin",
+          "path": "modules/deals/app/v3/dealsV3WriterPlugin.ts"
+        },
+        {
+          "label": "Deals repository DB configuration",
+          "path": "modules/deals/db/repository-db.yaml"
+        }
+      ],
+      "planning": {
+        "plan_id": "mcplan-dev-6614",
+        "path": "mission-control/plans/2026/10/DEV-6614-repository-db-semantic-publish-merge.yaml",
+        "source": "mission-control",
+        "role": "planning_source"
+      },
+      "source": "mission-control"
+    },
+    {
+      "id": "task-2026-10-04-802",
+      "title": "Integrate repository-db semantic conflict handling in Deals v3 and recover the held publish",
+      "status": "open",
+      "priority": "urgent",
+      "priority_rank": 2,
+      "assignee": "agent",
+      "priority_decider": "henry",
+      "priority_reason": "A library-only commit does not restore the hosted Deals operator flow until its pinned consumer and UI use the new contract.",
+      "created_at": "2026-10-03",
+      "updated_at": "2026-10-03",
+      "tags": [
+        "DEV-6614",
+        "mission-control",
+        "deals-v3",
+        "repository-db",
+        "draft-panel",
+        "recovery"
+      ],
+      "dev_code": "DEV-6614",
+      "summary": "Pin Deals to the reviewed library commit, show true conflict versus waiting-record counts, verify a synthetic end-to-end retry and then recover the held production batch through the standard lifecycle.",
+      "risk_notes": [
+        "Active Deals data stays read-only until the engine and consumer evidence is complete."
+      ],
+      "acceptance_criteria": [
+        "Deals panel distinguishes actual conflict paths from all pending draft resources.",
+        "Workspace-shaped Deals gates and synthetic retry pass on the pinned engine commit.",
+        "Active batch recovery meets the full repository-db post-send parity and validation gate."
+      ],
+      "links": [
+        {
+          "label": "Mission Control plan",
+          "path": "mission-control/plans/2026/10/DEV-6614-repository-db-semantic-publish-merge.yaml"
+        },
+        {
+          "label": "Repository DB publish lifecycle",
+          "path": "modules/repository-db/src/publish.ts"
+        },
+        {
+          "label": "Repository DB conflict state",
+          "path": "modules/repository-db/src/conflict.ts"
+        },
+        {
+          "label": "Deals v3 writer plugin",
+          "path": "modules/deals/app/v3/dealsV3WriterPlugin.ts"
+        },
+        {
+          "label": "Deals repository DB configuration",
+          "path": "modules/deals/db/repository-db.yaml"
+        }
+      ],
+      "planning": {
+        "plan_id": "mcplan-dev-6614",
+        "path": "mission-control/plans/2026/10/DEV-6614-repository-db-semantic-publish-merge.yaml",
+        "source": "mission-control",
+        "role": "planning_source"
+      },
+      "source": "mission-control"
+    }
+  ]
+}

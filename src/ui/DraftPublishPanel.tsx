@@ -34,6 +34,8 @@ export interface DraftPublishPanelApi {
 	 * the host can refuse if the pending commit is no longer that one.
 	 */
 	finishSend?(expectedHead: string | undefined): Promise<void>;
+	/** Retry only the engine-recorded conflict for the head the user saw. */
+	retryConflictSend?(expectedHead: string | undefined): Promise<void>;
 	/** Pull newer published data. */
 	pull?(): Promise<void>;
 	/** Abort the failed operation and restore the pre-publish state. */
@@ -201,6 +203,7 @@ export function DraftPublishPanel({
 						// Actions the host did not wire are shown as unavailable
 						// instead of as buttons that do nothing.
 						finishSend: Boolean(api.finishSend),
+						retryConflictSend: Boolean(api.retryConflictSend),
 						pull: Boolean(api.pull),
 						abortConflict: Boolean(api.abortConflict),
 						markConflictResolved: Boolean(api.markConflictResolved),
@@ -287,6 +290,13 @@ export function DraftPublishPanel({
 				void run(
 					() => api.finishSend?.(model.pendingHead) ?? Promise.resolve(),
 					"Odesláno.",
+				);
+				return;
+			}
+			if (kind === "retry_conflict_send" && api.retryConflictSend) {
+				void run(
+					() => api.retryConflictSend?.(model.pendingHead) ?? Promise.resolve(),
+					"Bezpečné sloučení proběhlo a odeslání je hotové.",
 				);
 				return;
 			}

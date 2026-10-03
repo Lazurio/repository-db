@@ -18,6 +18,7 @@ Usage:
                          --actor <actor> --source <source>
                          [--summary <text>] [--entity <id>]... [--json]
   repository-db finish-send [--mount <path>] --head <sha> [--json]
+  repository-db retry-send  [--mount <path>] --head <sha> [--json]
   repository-db review   [--mount <path>] [--json] [--inputs]
   repository-db discard  [--mount <path>] (--record <p> | --draft)
                          [--revision <draft-revision>] [--json]
@@ -34,7 +35,10 @@ Notes:
   trailers and sends it; a remote that moved meanwhile is integrated in a
   separate worktree, never in the checkout. When the send fails, the commit
   waits; finish-send pushes exactly that commit (--head, as printed by
-  status/review) and never makes a new one. sync --pull only fast-forwards.
+  status/review) and never makes a new one. retry-send confirms that same head
+  again and only retries an engine-recorded conflict through the canonical
+  structural merge guard; it never resolves a Git operation someone left open.
+  sync --pull only fast-forwards.
   Review reports the current draft as reviewable resources and prints its
   revision. Discard returns one record or the whole draft to the published
   state and runs only if the draft still matches that revision; omit
@@ -220,6 +224,16 @@ async function main(argv: string[]): Promise<number> {
 				result.state === "nothing_to_publish"
 					? "nothing to send (the remote already has this commit)"
 					: `sent ${result.commit} -> ${result.pushedTo}`,
+			);
+			return 0;
+		}
+		case "retry-send": {
+			const db = RepositoryDb.open(mountPath(args));
+			const result = await db.retryConflictSend({ expectedHead: requireFlag(args, "head") });
+			emit(args, result, () =>
+				result.state === "nothing_to_publish"
+					? "nothing to send (the remote already has this commit)"
+					: `retried and sent ${result.commit} -> ${result.pushedTo}`,
 			);
 			return 0;
 		}

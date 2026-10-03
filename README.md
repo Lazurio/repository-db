@@ -30,9 +30,15 @@ through a zod-compatible parser contract; the engine itself depends only on
   worktree, never in the checkout, then pushes. A failed push leaves the commit
   waiting; `finishSend` sends exactly that commit and never makes a new one.
 - **Conflict** — a send whose commits cannot be replayed onto the remote, or a
-  rebase/merge someone left in progress. The engine records it with a handoff
-  and refuses further writes and publishes until `conflict --abort` (the unsent
-  commits return to the draft) or `conflict --resolved`.
+  rebase/merge someone left in progress. For canonical YAML data files, the
+  replay first attempts a deterministic three-way structural merge: independent
+  map fields and unchanged-order objects keyed by `id` may combine; competing
+  business leaves, unordered arrays, comments/aliases, deletions and ordering
+  changes stay hard conflicts. Two valid conflicting `updatedAt` values use the
+  later timestamp and its `updatedBy*` siblings only after every business leaf
+  merged safely. The engine records unresolved files/fields with a handoff and
+  refuses further writes and publishes until `conflict --abort`, an explicit
+  engine `retry-send --head <sha>`, or a conscious `conflict --resolved`.
 - **Record revision** — a save carries the revision of the record version it
   was edited from and is refused if someone saved that record meanwhile.
 
@@ -88,6 +94,8 @@ repository-db validate
 repository-db sync
 repository-db publish --actor "Example User <user@example.com>" --source sample-app-v1 \
   [--summary "…"] [--entity record-123]...
+repository-db finish-send --head <sha>
+repository-db retry-send --head <sha>
 repository-db conflict [--abort | --resolved]
 ```
 

@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- **Safe semantic YAML publish merge.** A text-level rebase conflict under the
+  configured canonical data layout now first attempts a deterministic YAML
+  three-way merge in the temporary integration worktree. It combines only
+  independent mapping leaves and same-order object arrays keyed by `id`; it
+  rejects competing business leaves, adds/deletes/reorders in arrays,
+  comments/aliases and every unsupported YAML feature. When both valid
+  `updatedAt` fields conflict after all business leaves merge, the later
+  timestamp and its sibling `updatedBy*` metadata form one audit bundle. The
+  recorded conflict carries exact unresolved field pointers. `retryConflictSend`
+  / `repository-db retry-send --head <sha>` rechecks a clean exact head and
+  retries only an engine-recorded send; it cannot clear an external Git
+  operation. The shared panel counts actual conflict paths separately from
+  records held in the waiting publish.
+
 - Review hides nothing unsent: without an upstream it compares against the empty
   tree; committed-but-unsent changes keep their recorded origin; an undeclared
   generated file in an unsent commit blocks publish readiness. The draft

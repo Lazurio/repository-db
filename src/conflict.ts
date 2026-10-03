@@ -46,11 +46,11 @@ export function writeConflictState(
 			state.handoff ??
 			[
 				"repository-db zastavil další zápisy do vyřešení konfliktu.",
-				`1. Otevři data checkout: cd ${mountRoot}`,
-				"2. Prohlédni stav: git status",
-				"3a. Vyřeš konflikt ručně/agentem, dokonči rebase (git rebase --continue) a spusť: repository-db conflict --resolved",
-				"3b. Nebo rebase bezpečně zruš: repository-db conflict --abort",
-				"Do té doby repository-db odmítá writes i publish.",
+				"1. Neprováděj v aktivním data mountu ruční rebase, reset ani stash.",
+				"2. Ověř panel nebo `repository-db conflict`; uvádí přesně nevyřešené soubory a pole.",
+				"3. Pokud je k dispozici `retry-send`, potvrď zobrazený HEAD; engine zkusí bezpečné sloučení.",
+				"4. Jinak konflikt zruš přes `repository-db conflict --abort`, načti publikovaný stav a změnu proveď znovu.",
+				"5. Externí Git operaci nebo nejednoznačný business rozpor eskaluj stewardovi; data se nemění automaticky.",
 			].join("\n"),
 		...state,
 	};
@@ -162,6 +162,10 @@ export function abortConflict(mountRoot: string, branch: string): void {
 		}
 		runGitOrThrow(mountRoot, ["reset", "--mixed", "--quiet", base]);
 	}
+	rmSync(conflictPath(mountRoot), { force: true });
+}
+
+export function clearRecordedConflictState(mountRoot: string): void {
 	rmSync(conflictPath(mountRoot), { force: true });
 }
 
