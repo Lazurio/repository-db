@@ -40,7 +40,7 @@ export {
 	DEFAULT_GIT_NETWORK_TIMEOUT_MS,
 } from "./git.ts";
 export type { GitResult } from "./git.ts";
-export { finishSend, publish, pullRemote } from "./publish.ts";
+export { finishSend, publish, pullRemote, retryConflictSend } from "./publish.ts";
 export type { PullResult } from "./publish.ts";
 export { initDataRepo } from "./init.ts";
 export type { InitOptions, InitResult } from "./init.ts";

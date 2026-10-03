@@ -26,7 +26,7 @@ import {
 import { type ReviewOptions, computeReviewSnapshot } from "./review.ts";
 import { gitFetchAsync } from "./git.ts";
 import { runValidateCommands } from "./generated.ts";
-import { finishSend, publish, pullRemote, type PullResult } from "./publish.ts";
+import { finishSend, publish, pullRemote, retryConflictSend, type PullResult } from "./publish.ts";
 import {
 	deriveSyncStatus,
 	deriveSyncStatusAsync,
@@ -35,6 +35,7 @@ import {
 import type {
 	ConflictState,
 	FinishSendOptions,
+	RetryConflictSendOptions,
 	ReviewSurfaceSnapshot,
 	PublishOptions,
 	PublishResult,
@@ -98,6 +99,11 @@ export class RepositoryDb {
 	/** Send the commit shown as waiting; never makes a commit of its own. */
 	finishSend(options: FinishSendOptions): Promise<PublishResult> {
 		return finishSend(this.mountRoot, this.config, options);
+	}
+
+	/** Retry one engine-recorded pending send after confirming its exact commit. */
+	retryConflictSend(options: RetryConflictSendOptions): Promise<PublishResult> {
+		return retryConflictSend(this.mountRoot, this.config, options);
 	}
 
 	/** Fast-forward to colleagues' published work; never merges into local work. */

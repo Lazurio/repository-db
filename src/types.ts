@@ -475,6 +475,15 @@ export interface FinishSendOptions {
 	expectedHead: string;
 }
 
+/**
+ * Retry an engine-recorded, clean pending send. The caller must carry the exact
+ * waiting commit the operator reviewed; external Git operations are never
+ * eligible for this retry path.
+ */
+export interface RetryConflictSendOptions {
+	expectedHead: string;
+}
+
 export interface PublishResult {
 	/** `published` on success. */
 	state: "published" | "nothing_to_publish";
@@ -497,6 +506,12 @@ export interface ConflictState {
 	handoff: string;
 	/** Files both sides changed, when the engine knows them. */
 	paths?: string[];
+	/** Structural JSON-pointer paths the semantic YAML merger could not prove safe. */
+	unresolvedFields?: Record<string, string[]>;
+	/** Exact local commit eligible for an engine-managed retry, when recorded. */
+	pendingHead?: string;
+	/** True only for repository-db's isolated send-lane conflict, never external Git state. */
+	retryable?: boolean;
 }
 
 export class RepositoryDbError extends Error {

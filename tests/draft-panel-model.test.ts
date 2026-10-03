@@ -150,6 +150,38 @@ describe("draft panel model", () => {
 		expect(model.actions.find((action) => action.kind === "publish")?.enabled).toBe(false);
 	});
 
+	test("counts exact conflict paths separately from records held in the whole draft", () => {
+		const second = resource({
+			stableResourceId: "deals:deal-2",
+			label: "Druhý čekající deal",
+		});
+		const model = deriveDraftPanel(
+			input({
+				state: "conflict",
+				pendingHead: "abc123",
+				conflict: {
+					message: "Jedna technická kolize čeká na bezpečné sloučení.",
+					paths: ["data/deals/deal-1.yaml"],
+					retryable: true,
+				},
+				records: [
+					{ resource: resource(), technicalPath: "data/deals/deal-1.yaml", revert: { supported: true } },
+					{ resource: second, technicalPath: "data/deals/deal-2.yaml", revert: { supported: true } },
+				],
+			}),
+			{ retryConflictSend: true },
+		);
+
+		expect(model.count).toBe(1);
+		expect(model.waitingRecordCount).toBe(2);
+		expect(model.wholeDraftNote).toContain("1 další záznam čeká");
+		expect(model.actions.map((action) => action.kind)).toEqual([
+			"retry_conflict_send",
+			"abort_conflict",
+			"publish",
+		]);
+	});
+
 	test("disables publish with the blocking reason attached", () => {
 		const model = deriveDraftPanel(
 			input({

@@ -120,6 +120,73 @@ describe("publish flow", () => {
 		}
 	});
 
+	test("publish structurally merges a text-conflicted YAML record without choosing a business winner", async () => {
+		const fixture = createFixtureRepo();
+		try {
+			const base = {
+				amount: 100,
+				stage: "draft",
+				updatedAt: "2026-10-01T10:00:00.000Z",
+				updatedByName: "Base editor",
+				lines: [
+					{ id: "line-a", quantity: 1, unitPrice: 10 },
+					{ id: "line-b", quantity: 1, unitPrice: 20 },
+				],
+			};
+			writeFixtureDocument(fixture.mountPath, "thing-1", base);
+			git(fixture.mountPath, ["add", "--all"]);
+			git(fixture.mountPath, ["commit", "--message", "seed semantic merge fixture"]);
+			git(fixture.mountPath, ["push", "origin", fixture.branch]);
+
+			const second = cloneFixture(fixture, "semantic-remote");
+			writeFixtureDocument(second, "thing-1", {
+				...base,
+				stage: "approved",
+				updatedAt: "2026-10-02T10:00:00.000Z",
+				updatedByName: "Remote editor",
+				lines: [
+					{ id: "line-a", quantity: 1, unitPrice: 10 },
+					{ id: "line-b", quantity: 1, unitPrice: 25 },
+				],
+			});
+			git(second, ["add", "--all"]);
+			git(second, ["commit", "--message", "remote independent fields"]);
+			git(second, ["push", "origin", fixture.branch]);
+
+			const db = RepositoryDb.open(fixture.mountPath);
+			writeFixtureDocument(fixture.mountPath, "thing-1", {
+				...base,
+				amount: 110,
+				updatedAt: "2026-10-03T10:00:00.000Z",
+				updatedByName: "Local editor",
+				lines: [
+					{ id: "line-a", quantity: 2, unitPrice: 10 },
+					{ id: "line-b", quantity: 1, unitPrice: 20 },
+				],
+			});
+
+			const result = await db.publish({
+				expectedRevision: db.draftRevision(),
+				actor: "Test Actor <test@spectoda.com>",
+				source: "repository-db-test",
+			});
+
+			expect(result.state).toBe("published");
+			expect(result.remoteChanges).toEqual(["data/things/thing-1.yaml"]);
+			expect(db.conflict()).toBeUndefined();
+			const merged = readFileSync(path.join(fixture.mountPath, "data/things/thing-1.yaml"), "utf8");
+			expect(merged).toContain("amount: 110");
+			expect(merged).toContain("stage: approved");
+			expect(merged).toContain("quantity: 2");
+			expect(merged).toContain("unitPrice: 25");
+			expect(merged).toContain("updatedAt: 2026-10-03T10:00:00.000Z");
+			expect(merged).toContain("updatedByName: Local editor");
+			expect((await db.statusAsync({ fetch: true })).state).toBe("published");
+		} finally {
+			rmSync(fixture.root, { recursive: true, force: true });
+		}
+	});
+
 	test("pull fast-forwards under a draft on other files and keeps the draft", async () => {
 		const fixture = createFixtureRepo();
 		try {

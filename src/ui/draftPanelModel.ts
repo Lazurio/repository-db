@@ -30,6 +30,10 @@ export interface DraftPanelConflict {
 	message: string;
 	/** Recovery handoff text for an agent or a developer. */
 	handoff?: string;
+	/** Exact technical files the engine could not integrate. */
+	paths?: string[];
+	/** True only when the engine can retry the displayed pending commit safely. */
+	retryable?: boolean;
 }
 
 export interface DraftPanelInput {
@@ -78,6 +82,7 @@ export interface DraftPanelAction {
 		| "publish"
 		| "discard_draft"
 		| "finish_send"
+		| "retry_conflict_send"
 		| "pull"
 		| "abort_conflict"
 		| "mark_conflict_resolved";
@@ -98,6 +103,8 @@ export interface DraftPanelModel {
 	pill: string;
 	/** Count shown next to the pill; 0 hides it. */
 	count: number;
+	/** Records that remain held by the whole-draft publish while a conflict is resolved. */
+	waitingRecordCount: number;
 	/** One-line explanation at the top of the open panel. */
 	headline: string;
 	/** Says out loud that the whole draft goes out together. */
@@ -164,6 +171,7 @@ function recordOf(input: DraftPanelRecordInput): DraftPanelRecord {
 /** Which optional recovery actions the host actually implements. */
 export interface DraftPanelCapabilities {
 	finishSend?: boolean;
+	retryConflictSend?: boolean;
 	pull?: boolean;
 	abortConflict?: boolean;
 	markConflictResolved?: boolean;
@@ -182,6 +190,7 @@ function applyCapabilities(
 	if (!capabilities) return actions;
 	const supported: Record<string, boolean | undefined> = {
 		finish_send: capabilities.finishSend,
+		retry_conflict_send: capabilities.retryConflictSend,
 		pull: capabilities.pull,
 		abort_conflict: capabilities.abortConflict,
 		mark_conflict_resolved: capabilities.markConflictResolved,
@@ -217,41 +226,64 @@ export function deriveDraftPanel(
 				: record,
 		);
 	const count = records.length;
+	const conflictPathCount = input.conflict?.paths
+		? new Set(input.conflict.paths.filter((entry) => typeof entry === "string" && entry.length > 0)).size
+		: count;
 	const base = {
 		records,
 		revision: input.revision,
 		pendingHead: input.pendingHead,
+		waitingRecordCount: count,
 		ownerNote: input.draftOwner?.actor
 			? `Rozpracované změny začal: ${input.draftOwner.actor}`
 			: undefined,
 	};
 
 	if (input.state === "conflict") {
+		const canRetry = input.conflict?.retryable === true && Boolean(input.pendingHead);
+		const actions: DraftPanelAction[] = [
+			...(canRetry
+				? [
+						{
+							kind: "retry_conflict_send" as const,
+							label: "Zkusit bezpečně sloučit a odeslat",
+							enabled: true,
+						},
+					]
+				: []),
+			{
+				kind: "abort_conflict",
+				label: "Zrušit odeslání, změny nechat rozpracované",
+				enabled: true,
+				destructive: true,
+			},
+			...(canRetry ? [] : [{ kind: "mark_conflict_resolved" as const, label: "Označit za vyřešené", enabled: true }]),
+			{
+				kind: "publish",
+				label: "Publikovat vše",
+				enabled: false,
+				disabledReason: "Nejdřív je potřeba vyřešit konflikt.",
+			},
+		];
 		return {
 			...base,
 			visible: true,
 			tone: "conflict",
 			pill: "Konflikt",
-			count,
+			count: conflictPathCount,
 			conflict: input.conflict ?? null,
 			headline:
 				input.conflict?.message ??
 				"Data se rozešla se serverem. Změny zůstávají vidět, ale publikovat ani vracet teď nejde.",
-			actions: applyCapabilities([
-				{
-					kind: "abort_conflict",
-					label: "Zrušit odeslání, změny nechat rozpracované",
-					enabled: true,
-					destructive: true,
-				},
-				{ kind: "mark_conflict_resolved", label: "Označit za vyřešené", enabled: true },
-				{
-					kind: "publish",
-					label: "Publikovat vše",
-					enabled: false,
-					disabledReason: "Nejdřív je potřeba vyřešit konflikt.",
-				},
-			], capabilities),
+			...(count > conflictPathCount
+				? {
+					wholeDraftNote:
+						count - conflictPathCount === 1
+							? "1 další záznam čeká na vyřešení tohoto konfliktu; není to další konflikt."
+							: `${count - conflictPathCount} dalších záznamů čeká na vyřešení tohoto konfliktu; nejsou to další konflikty.`,
+				}
+				: {}),
+			actions: applyCapabilities(actions, capabilities),
 		};
 	}
 

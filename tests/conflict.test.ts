@@ -39,7 +39,7 @@ describe("integration conflicts happen in the lane, never in the checkout", () =
 
 			await expect(
 				db.publish({ actor: "a <a@a>", source: "test", expectedRevision: db.draftRevision() }),
-			).rejects.toThrow(/publish stopped: remote changes to the same files/);
+			).rejects.toThrow(/publish stopped: remote changes could not be safely integrated/);
 
 			// The checkout was never rebased: no operation in progress, no
 			// markers, the local file exactly as written.
@@ -133,6 +133,88 @@ describe("integration conflicts happen in the lane, never in the checkout", () =
 			expect(git(fixture.mountPath, ["show", "HEAD:data/things/thing-1.yaml"])).toContain(
 				"merged-version",
 			);
+		} finally {
+			rmSync(fixture.root, { recursive: true, force: true });
+		}
+	});
+
+	test("retries only an engine-recorded clean pending send with the displayed head", async () => {
+		const fixture = createFixtureRepo();
+		try {
+			const base = {
+				amount: 100,
+				stage: "draft",
+				updatedAt: "2026-10-01T10:00:00.000Z",
+				updatedByName: "Base editor",
+			};
+			writeFixtureDocument(fixture.mountPath, "thing-1", base);
+			git(fixture.mountPath, ["add", "--all"]);
+			git(fixture.mountPath, ["commit", "--message", "seed retry fixture"]);
+			git(fixture.mountPath, ["push", "origin", fixture.branch]);
+
+			const second = cloneFixture(fixture, "retry-remote");
+			writeFixtureDocument(second, "thing-1", {
+				...base,
+				stage: "approved",
+				updatedAt: "2026-10-02T10:00:00.000Z",
+				updatedByName: "Remote editor",
+			});
+			git(second, ["add", "--all"]);
+			git(second, ["commit", "--message", "remote retry field"]);
+			git(second, ["push", "origin", fixture.branch]);
+
+			writeFixtureDocument(fixture.mountPath, "thing-1", {
+				...base,
+				amount: 110,
+				updatedAt: "2026-10-03T10:00:00.000Z",
+				updatedByName: "Local editor",
+			});
+			git(fixture.mountPath, ["add", "--all"]);
+			git(fixture.mountPath, ["commit", "--message", "local retry field"]);
+			const head = git(fixture.mountPath, ["rev-parse", "HEAD"]).trim();
+			const { writeConflictState } = await import("../src/conflict.ts");
+			writeConflictState(fixture.mountPath, {
+				detectedAt: "2026-10-04T10:00:00.000Z",
+				operation: "publish",
+				gitState: "fixture conflict",
+				message: "fixture conflict",
+				paths: ["data/things/thing-1.yaml"],
+				pendingHead: head,
+				retryable: true,
+				handoff: "fixture",
+			});
+
+			const db = RepositoryDb.open(fixture.mountPath);
+			await expect(db.retryConflictSend({ expectedHead: "not-the-displayed-head" })).rejects.toThrow(
+				/no longer the one that was shown/,
+			);
+			expect(db.conflict()).toBeDefined();
+			const result = await db.retryConflictSend({ expectedHead: head });
+			expect(result.state).toBe("published");
+			expect(db.conflict()).toBeUndefined();
+			expect(readThing(fixture.mountPath, "thing-1")).toContain("amount: 110");
+			expect(readThing(fixture.mountPath, "thing-1")).toContain("stage: approved");
+			expect((await db.statusAsync({ fetch: true })).state).toBe("published");
+		} finally {
+			rmSync(fixture.root, { recursive: true, force: true });
+		}
+	});
+
+	test("never retries an external Git conflict marker", async () => {
+		const fixture = createFixtureRepo();
+		try {
+			const { writeConflictState } = await import("../src/conflict.ts");
+			writeConflictState(fixture.mountPath, {
+				detectedAt: "2026-10-04T10:00:00.000Z",
+				operation: "external",
+				gitState: "fixture external operation",
+				message: "external fixture conflict",
+				handoff: "fixture",
+			});
+			const db = RepositoryDb.open(fixture.mountPath);
+			const head = git(fixture.mountPath, ["rev-parse", "HEAD"]).trim();
+			await expect(db.retryConflictSend({ expectedHead: head })).rejects.toThrow(/Only an engine-recorded/);
+			expect(db.conflict()?.operation).toBe("external");
 		} finally {
 			rmSync(fixture.root, { recursive: true, force: true });
 		}
