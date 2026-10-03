@@ -17,6 +17,7 @@ import {
 	gitDirtyPaths,
 	gitFetchAsync,
 	gitHeadCommit,
+	gitOperationInProgress,
 	gitRenameSources,
 	gitUnmergedPaths,
 	runGit,
@@ -25,6 +26,7 @@ import {
 } from "./git.ts";
 import {
 	assertDeclaredGeneratedOnly,
+	isPathDeclared,
 	isUndeclaredGenerated,
 	materializeGenerated,
 	runValidateCommands,
@@ -124,6 +126,20 @@ function laneStageText(laneRoot: string, stage: 1 | 2 | 3, relativePath: string)
 	return result.status === 0 ? result.stdout : undefined;
 }
 
+/** Git index stages used by semantic resolution must all be regular files. */
+function laneHasOnlyRegularConflictStages(laneRoot: string, relativePath: string): boolean {
+	const listed = runGit(laneRoot, ["ls-files", "-u", "--stage", "-z", "--", relativePath]);
+	if (listed.status !== 0) return false;
+	const entries = listed.stdout.split("\0").filter(Boolean);
+	if (entries.length !== 3) return false;
+	return entries.every((entry) => {
+		const separator = entry.indexOf("	");
+		if (separator === -1 || entry.slice(separator + 1) !== relativePath) return false;
+		const mode = entry.slice(0, separator).split(" ")[0];
+		return mode === "100644" || mode === "100755";
+	});
+}
+
 /**
  * Git has already proved a text-level conflict in the isolated lane. Try only
  * canonical YAML data files and stage a result only when the structural merger
@@ -138,6 +154,10 @@ function resolveSemanticLaneConflicts(
 	for (const relativePath of paths) {
 		if (!isCanonicalDataYamlPath(config, relativePath)) {
 			conflicts.push({ path: relativePath, reason: "path is not canonical YAML data" });
+			continue;
+		}
+		if (!laneHasOnlyRegularConflictStages(laneRoot, relativePath)) {
+			conflicts.push({ path: relativePath, reason: "conflict stages are not three regular files" });
 			continue;
 		}
 		const absolutePath = laneAbsolutePath(laneRoot, relativePath);
@@ -175,6 +195,34 @@ function resolveSemanticLaneConflicts(
 }
 
 /**
+ * A semantic union may change declared read models even when Git did not see a
+ * text conflict in their files. Rebuild only in the disposable lane, reject
+ * every non-declared side effect, validate there, then amend the replayed tip.
+ */
+function materializeSemanticLane(laneRoot: string, config: RepositoryDbConfig): void {
+	if (engineDirFree(gitDirtyPaths(laneRoot)).length > 0) {
+		throw new RepositoryDbError(
+			"semantic_lane_dirty",
+			"semantic integration lane is unexpectedly dirty before generated output is rebuilt",
+		);
+	}
+	materializeGenerated(laneRoot, config);
+	const changed = engineDirFree(gitDirtyPaths(laneRoot));
+	const undeclared = changed.filter((entry) => !isPathDeclared(entry, config));
+	if (undeclared.length > 0) {
+		throw new RepositoryDbError(
+			"generated_policy",
+			`semantic integration materializer changed paths outside generated_manifest (${undeclared.join(", ")})`,
+		);
+	}
+	assertDeclaredGeneratedOnly(laneRoot, config);
+	runValidateCommands(laneRoot, config);
+	if (changed.length === 0) return;
+	runGitOrThrow(laneRoot, ["add", "--", ...changed]);
+	runGitOrThrow(laneRoot, ["commit", "--amend", "--no-edit"]);
+}
+
+/**
  * Replay the local commits onto the fetched remote in a throwaway worktree.
  * Whatever happens there, the live checkout is untouched. Git first tries its
  * normal merge; only text-conflicted canonical YAML gets a conservative
@@ -188,12 +236,14 @@ async function rebaseInLane(
 ): Promise<LaneResult> {
 	const parent = mkdtempSync(path.join(os.tmpdir(), "repository-db-lane-"));
 	const laneRoot = path.join(parent, "lane");
+	let usedSemanticMerge = false;
 	try {
 		runGitOrThrow(mountRoot, ["worktree", "add", "--detach", laneRoot, start]);
 		let rebase = await runGitAsync(laneRoot, ["rebase", onto]);
 		for (let attempts = 0; attempts < 64; attempts += 1) {
 			const unmerged = gitUnmergedPaths(laneRoot);
 			if (rebase.status === 0 && unmerged.length === 0) {
+				if (usedSemanticMerge) materializeSemanticLane(laneRoot, config);
 				return { ok: true, head: gitHeadCommit(laneRoot) ?? start };
 			}
 			if (unmerged.length === 0) {
@@ -213,6 +263,7 @@ async function rebaseInLane(
 					conflicts: semantic.conflicts,
 				};
 			}
+			usedSemanticMerge = true;
 			rebase = runGit(laneRoot, ["-c", "core.editor=true", "rebase", "--continue"]);
 		}
 		return {
@@ -381,9 +432,9 @@ export async function publish(
 			return { state: "nothing_to_publish" };
 		}
 
-		if (!options.skipValidate) runValidateCommands(mountRoot, config);
 		if (!options.skipMaterialize) materializeGenerated(mountRoot, config);
 		assertDeclaredGeneratedOnly(mountRoot, config);
+		if (!options.skipValidate) runValidateCommands(mountRoot, config);
 		// A commit already waiting below this draft leaves with it, so it is
 		// held to the same rule as when it is finished on its own.
 		assertUnsentGeneratedDeclared(mountRoot, config);
@@ -504,6 +555,14 @@ export async function retryConflictSend(
 			throw new RepositoryDbError(
 				"conflict_not_retryable",
 				"Only an engine-recorded pending send can be retried. External Git conflicts must be resolved or aborted outside this API.",
+			);
+		}
+		const operation = gitOperationInProgress(mountRoot);
+		const unmerged = gitUnmergedPaths(mountRoot);
+		if (operation || unmerged.length > 0) {
+			throw new RepositoryDbError(
+				"conflict_not_retryable",
+				"Retry requires a clean engine-recorded send; an external Git operation or unresolved index is active.",
 			);
 		}
 		const head = gitHeadCommit(mountRoot);

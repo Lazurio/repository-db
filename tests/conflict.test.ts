@@ -220,6 +220,46 @@ describe("integration conflicts happen in the lane, never in the checkout", () =
 		}
 	});
 
+	test("does not retry an engine marker while an external rebase is active", async () => {
+		const fixture = createFixtureRepo();
+		try {
+			seedAndDivergeRemote(fixture);
+			writeFixtureDocument(fixture.mountPath, "thing-1", { name: "local-version" });
+			git(fixture.mountPath, ["add", "--all"]);
+			git(fixture.mountPath, ["commit", "--message", "local conflicting edit"]);
+			git(fixture.mountPath, ["fetch", "origin"]);
+			const head = git(fixture.mountPath, ["rev-parse", "HEAD"]).trim();
+			const { writeConflictState } = await import("../src/conflict.ts");
+			writeConflictState(fixture.mountPath, {
+				detectedAt: "2026-10-04T10:00:00.000Z",
+				operation: "publish",
+				gitState: "fixture engine conflict",
+				message: "fixture engine conflict",
+				paths: ["data/things/thing-1.yaml"],
+				pendingHead: head,
+				retryable: true,
+				handoff: "fixture",
+			});
+			const rebase = Bun.spawnSync([
+				"git",
+				"-C",
+				fixture.mountPath,
+				"rebase",
+				`origin/${fixture.branch}`,
+			]);
+			expect(rebase.exitCode).not.toBe(0);
+
+			const db = RepositoryDb.open(fixture.mountPath);
+			await expect(db.retryConflictSend({ expectedHead: head })).rejects.toThrow(
+				/external Git operation or unresolved index/,
+			);
+			expect(db.conflict()?.pendingHead).toBe(head);
+			git(fixture.mountPath, ["rebase", "--abort"]);
+		} finally {
+			rmSync(fixture.root, { recursive: true, force: true });
+		}
+	});
+
 	test("a rebase someone started by hand is reported as a conflict and abort runs rebase --abort", async () => {
 		const fixture = createFixtureRepo();
 		try {

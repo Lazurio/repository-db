@@ -152,4 +152,54 @@ describe("mergeCanonicalYamlThreeWay", () => {
 		expect(result.unresolvedPaths).toEqual(["/"]);
 		expect(result.reason).toContain("comments");
 	});
+
+	test("refuses non-canonical stable representation and a non-mapping document root", () => {
+		const nonCanonical = toStableYaml(thing()).replace("stage: draft", 'stage: "draft"');
+		const representation = mergeCanonicalYamlThreeWay(
+			nonCanonical,
+			toStableYaml(thing({ amount: 110 })),
+			toStableYaml(thing({ stage: "approved" })),
+		);
+		expect(representation.ok).toBe(false);
+		expect(representation.reason).toContain("canonical stable representation");
+
+		const listRoot = toStableYaml([{ id: "not-an-envelope" }]);
+		const root = mergeCanonicalYamlThreeWay(listRoot, listRoot, listRoot);
+		expect(root.ok).toBe(false);
+		expect(root.reason).toContain("root must be a canonical mapping");
+	});
+
+	test("does not treat nested updatedAt fields as audit metadata", () => {
+		const base = {
+			...thing(),
+			record: {
+				...thing().record,
+				metadata: {
+					updatedAt: "2026-10-01T10:00:00.000Z",
+					updatedByName: "Base editor",
+					localNote: "base",
+					remoteNote: "base",
+				},
+			},
+		};
+		const local = structuredClone(base);
+		local.record.metadata.updatedAt = "2026-10-03T10:00:00.000Z";
+		local.record.metadata.updatedByName = "Local editor";
+		local.record.metadata.localNote = "local";
+		const remote = structuredClone(base);
+		remote.record.metadata.updatedAt = "2026-10-02T10:00:00.000Z";
+		remote.record.metadata.updatedByName = "Remote editor";
+		remote.record.metadata.remoteNote = "remote";
+
+		const result = mergeCanonicalYamlThreeWay(
+			toStableYaml(base),
+			toStableYaml(local),
+			toStableYaml(remote),
+		);
+		expect(result.ok).toBe(false);
+		expect(result.unresolvedPaths).toEqual([
+			"/record/metadata/updatedAt",
+			"/record/metadata/updatedByName",
+		]);
+	});
 });

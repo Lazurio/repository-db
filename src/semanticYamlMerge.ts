@@ -67,8 +67,12 @@ function own(record: Record<string, unknown>, key: string): MergeValue {
 	return Object.prototype.hasOwnProperty.call(record, key) ? record[key] : MISSING;
 }
 
-function isAuditMetadataKey(key: string): boolean {
-	return key === "updatedAt" || key.startsWith("updatedBy");
+function isAuditMetadataKey(pointer: string, key: string): boolean {
+	// Only the envelope's direct record audit bundle is non-domain metadata.
+	// A nested object can legitimately have business fields named updatedAt or
+	// updatedBy*, so treating those as a timestamp winner would silently make a
+	// business decision.
+	return pointer === "/record" && (key === "updatedAt" || key.startsWith("updatedBy"));
 }
 
 function parseIsoTimestamp(value: MergeValue): number | undefined {
@@ -118,7 +122,7 @@ function mergeRecord(
 
 	// Domain-bearing keys are always merged first. Audit metadata may be chosen
 	// only after this pass has proven all actual business values unambiguous.
-	for (const key of keys.filter((entry) => !isAuditMetadataKey(entry))) {
+	for (const key of keys.filter((entry) => !isAuditMetadataKey(pointer, entry))) {
 		const merged = mergeValue(own(base, key), own(local, key), own(remote, key), pointerChild(pointer, key));
 		if (merged.value !== MISSING) value[key] = merged.value;
 		unresolvedPaths.push(...merged.unresolvedPaths);
@@ -129,10 +133,10 @@ function mergeRecord(
 		return { value: MISSING, unresolvedPaths, usedAuditMetadataRule };
 	}
 
-	const winner = auditMetadataWinner(base, local, remote);
+	const winner = pointer === "/record" ? auditMetadataWinner(base, local, remote) : undefined;
 	if (winner) {
 		const source = winner === "local" ? local : remote;
-		for (const key of keys.filter(isAuditMetadataKey)) {
+		for (const key of keys.filter((entry) => isAuditMetadataKey(pointer, entry))) {
 			const selected = own(source, key);
 			if (selected !== MISSING) value[key] = selected;
 		}
@@ -140,7 +144,7 @@ function mergeRecord(
 		return { value, unresolvedPaths, usedAuditMetadataRule };
 	}
 
-	for (const key of keys.filter(isAuditMetadataKey)) {
+	for (const key of keys.filter((entry) => isAuditMetadataKey(pointer, entry))) {
 		const merged = mergeValue(own(base, key), own(local, key), own(remote, key), pointerChild(pointer, key));
 		if (merged.value !== MISSING) value[key] = merged.value;
 		unresolvedPaths.push(...merged.unresolvedPaths);
@@ -266,6 +270,12 @@ function parseCanonicalYaml(text: string | undefined, label: string): ParsedCano
 		const value = document.toJS({ maxAliasCount: 0 });
 		if (!isJsonLike(value)) {
 			return { ok: false, reason: `${label} YAML contains a non-canonical value` };
+		}
+		if (!isRecord(value)) {
+			return { ok: false, reason: `${label} YAML root must be a canonical mapping` };
+		}
+		if (toStableYaml(value) !== text) {
+			return { ok: false, reason: `${label} YAML is not in canonical stable representation` };
 		}
 		return { ok: true, value };
 	} catch {

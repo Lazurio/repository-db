@@ -25,20 +25,24 @@ through a zod-compatible parser contract; the engine itself depends only on
   writes are plain filesystem operations; nothing commits on keypress.
 - **Publish** — one explicit action turning the confirmed draft revision into a
   single audited commit:
-  `validate → materialize generated → one commit with Repository-Db-* trailers
+  `materialize generated → validate → one commit with Repository-Db-* trailers
   → send`. Sending replays the commit onto a moved remote in a temporary
   worktree, never in the checkout, then pushes. A failed push leaves the commit
   waiting; `finishSend` sends exactly that commit and never makes a new one.
 - **Conflict** — a send whose commits cannot be replayed onto the remote, or a
-  rebase/merge someone left in progress. For canonical YAML data files, the
-  replay first attempts a deterministic three-way structural merge: independent
-  map fields and unchanged-order objects keyed by `id` may combine; competing
-  business leaves, unordered arrays, comments/aliases, deletions and ordering
-  changes stay hard conflicts. Two valid conflicting `updatedAt` values use the
-  later timestamp and its `updatedBy*` siblings only after every business leaf
-  merged safely. The engine records unresolved files/fields with a handoff and
-  refuses further writes and publishes until `conflict --abort`, an explicit
-  engine `retry-send --head <sha>`, or a conscious `conflict --resolved`.
+  rebase/merge someone left in progress. For canonical stable YAML mapping data
+  files with three regular Git index stages, the replay first attempts a
+  deterministic three-way structural merge: independent map fields and
+  unchanged-order objects keyed by `id` may combine; competing business leaves,
+  unordered arrays, comments/aliases, noncanonical presentation, deletions and
+  ordering changes stay hard conflicts. Only direct `record.updatedAt` and
+  `record.updatedBy*` are audit metadata: when both timestamps are valid and
+  every business leaf merged safely, the later timestamp selects that matching
+  audit bundle. After any semantic union the disposable lane rematerializes and
+  validates declared generated output before it can move the checkout. The
+  engine records unresolved files/fields with a handoff and refuses further
+  writes and publishes until `conflict --abort`, an explicit engine
+  `retry-send --head <sha>`, or a conscious `conflict --resolved`.
 - **Record revision** — a save carries the revision of the record version it
   was edited from and is refused if someone saved that record meanwhile.
 
