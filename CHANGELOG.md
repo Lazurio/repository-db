@@ -4,17 +4,20 @@
 
 - **Safe semantic YAML publish merge.** A text-level rebase conflict under the
   configured canonical data layout now first attempts a deterministic YAML
-  three-way merge in the temporary integration worktree. It combines only
+  three-way merge in the temporary integration worktree. It accepts only stable
+  YAML mapping documents stored in three regular Git index stages, then combines
   independent mapping leaves and same-order object arrays keyed by `id`; it
   rejects competing business leaves, adds/deletes/reorders in arrays,
-  comments/aliases and every unsupported YAML feature. When both valid
-  `updatedAt` fields conflict after all business leaves merge, the later
-  timestamp and its sibling `updatedBy*` metadata form one audit bundle. The
-  recorded conflict carries exact unresolved field pointers. `retryConflictSend`
-  / `repository-db retry-send --head <sha>` rechecks a clean exact head and
-  retries only an engine-recorded send; it cannot clear an external Git
-  operation. The shared panel counts actual conflict paths separately from
-  records held in the waiting publish.
+  comments/aliases, noncanonical presentation and every unsupported YAML
+  feature. Only direct `record.updatedAt` plus direct sibling `updatedBy*`
+  fields are audit metadata: when all business leaves merge, the later valid
+  timestamp selects that matching audit bundle. A semantic union rematerializes
+  and validates declared generated output in the isolated lane before it moves
+  the checkout. The recorded conflict carries exact unresolved field pointers.
+  `retryConflictSend` / `repository-db retry-send --head <sha>` rechecks a
+  clean exact head and refuses an external Git operation; it retries only an
+  engine-recorded send. The shared panel counts actual conflict paths separately
+  from records held in the waiting publish.
 
 - Review hides nothing unsent: without an upstream it compares against the empty
   tree; committed-but-unsent changes keep their recorded origin; an undeclared
@@ -44,7 +47,7 @@
   owns its unsaved content and save, no handover of pending edits.
 
 - **The engine owns the whole publish lifecycle.** `publish` confirms the draft
-  revision, validates, materializes, commits and sends. Sending replays onto a
+  revision, materializes, validates, commits and sends. Sending replays onto a
   moved remote in a temporary worktree — never in the checkout, which moves
   only by `reset --keep` after success — then pushes. A replay conflict is
   recorded with the files involved; `abortConflict` returns the unsent commits

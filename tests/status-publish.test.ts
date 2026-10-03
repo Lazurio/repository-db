@@ -6,9 +6,11 @@ import { parseCommitMessage } from "../src/trailers.ts";
 import {
 	cloneFixture,
 	createFixtureRepo,
+	fixtureConfigValue,
 	git,
 	writeFixtureDocument,
 } from "./fixtures.ts";
+import { toStableYaml } from "../src/yamlIo.ts";
 
 describe("sync status model", () => {
 	test("walks draft -> committed_not_pushed -> published -> pull_needed", async () => {
@@ -182,6 +184,88 @@ describe("publish flow", () => {
 			expect(merged).toContain("updatedAt: 2026-10-03T10:00:00.000Z");
 			expect(merged).toContain("updatedByName: Local editor");
 			expect((await db.statusAsync({ fetch: true })).state).toBe("published");
+		} finally {
+			rmSync(fixture.root, { recursive: true, force: true });
+		}
+	});
+
+	test("semantic integration rematerializes and validates declared generated output in the lane", async () => {
+		const fixture = createFixtureRepo();
+		try {
+			writeFileSync(
+				path.join(fixture.mountPath, "repository-db.yaml"),
+				toStableYaml(
+					fixtureConfigValue(fixture.originPath, fixture.branch, {
+						generated_manifest: [
+							{
+								path: "generated/semantic-summary.yaml",
+								materializer: "cp data/things/thing-1.yaml generated/semantic-summary.yaml",
+							},
+						],
+						validate: [
+							"cmp -s data/things/thing-1.yaml generated/semantic-summary.yaml",
+						],
+					}),
+				),
+				"utf8",
+			);
+			git(fixture.mountPath, ["add", "--all"]);
+			git(fixture.mountPath, ["commit", "--message", "configure generated semantic fixture"]);
+			git(fixture.mountPath, ["push", "origin", fixture.branch]);
+
+			const base = {
+				amount: 100,
+				stage: "draft",
+				updatedAt: "2026-10-01T10:00:00.000Z",
+				updatedByName: "Base editor",
+			};
+			const db = RepositoryDb.open(fixture.mountPath);
+			expect(db.config.generatedManifest).toEqual([
+				{
+					path: "generated/semantic-summary.yaml",
+					materializer: "cp data/things/thing-1.yaml generated/semantic-summary.yaml",
+					note: undefined,
+				},
+			]);
+			writeFixtureDocument(fixture.mountPath, "thing-1", base);
+			await db.publish({
+				expectedRevision: db.draftRevision(),
+				actor: "Test Actor <test@spectoda.com>",
+				source: "repository-db-test",
+			});
+
+			const second = cloneFixture(fixture, "semantic-generated-remote");
+			writeFixtureDocument(second, "thing-1", {
+				...base,
+				stage: "approved",
+				updatedAt: "2026-10-02T10:00:00.000Z",
+				updatedByName: "Remote editor",
+			});
+			git(second, ["add", "data/things/thing-1.yaml"]);
+			git(second, ["commit", "--message", "remote semantic data change"]);
+			git(second, ["push", "origin", fixture.branch]);
+
+			writeFixtureDocument(fixture.mountPath, "thing-1", {
+				...base,
+				amount: 110,
+				updatedAt: "2026-10-03T10:00:00.000Z",
+				updatedByName: "Local editor",
+			});
+			const result = await db.publish({
+				expectedRevision: db.draftRevision(),
+				actor: "Test Actor <test@spectoda.com>",
+				source: "repository-db-test",
+			});
+			expect(result.state).toBe("published");
+			const merged = readFileSync(path.join(fixture.mountPath, "data/things/thing-1.yaml"), "utf8");
+			const generated = readFileSync(
+				path.join(fixture.mountPath, "generated/semantic-summary.yaml"),
+				"utf8",
+			);
+			expect(generated).toBe(merged);
+			expect(git(fixture.originPath, ["show", `${fixture.branch}:generated/semantic-summary.yaml`])).toBe(
+				merged,
+			);
 		} finally {
 			rmSync(fixture.root, { recursive: true, force: true });
 		}
