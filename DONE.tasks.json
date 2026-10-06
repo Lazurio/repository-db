@@ -1,0 +1,143 @@
+{
+  "schema_version": "companiesascode.done_tasks.v1",
+  "scope": {
+    "id": "repository-db",
+    "name": "Repository DB",
+    "path": "modules/repository-db",
+    "owner": "workspace-steward"
+  },
+  "tasks": [
+    {
+      "id": "task-2026-10-04-801",
+      "title": "Add proven YAML semantic merge and safe pending-send retry to repository-db",
+      "status": "done",
+      "priority": "urgent",
+      "priority_rank": 1,
+      "assignee": "agent",
+      "priority_decider": "henry",
+      "priority_reason": "Deals publishing was blocked by a technically false conflict and normal concurrent editing was unusable.",
+      "created_at": "2026-10-03",
+      "updated_at": "2026-10-06",
+      "tags": [
+        "DEV-6614",
+        "mission-control",
+        "repository-db",
+        "yaml",
+        "publish",
+        "conflict-safety"
+      ],
+      "dev_code": "DEV-6614",
+      "summary": "Implement deterministic structural merge, bounded audit metadata handling, precise conflict evidence and explicit retry for engine-recorded clean pending sends; cover safe and unsafe fixtures.",
+      "risk_notes": [
+        "No broad last-write-wins behavior was introduced for business data."
+      ],
+      "acceptance_criteria": [
+        "Safe field-level and id-keyed-array merges send successfully without an engine conflict marker.",
+        "Every ambiguous business merge stays blocked and reports exact unresolved paths.",
+        "Retry refuses any changed pending head, dirty tree or external Git conflict."
+      ],
+      "links": [
+        {
+          "label": "Mission Control plan",
+          "path": "mission-control/plans/2026/10/DEV-6614-repository-db-semantic-publish-merge.yaml"
+        },
+        {
+          "label": "Repository DB pull request",
+          "path": "https://github.com/Lazurio/repository-db/pull/14"
+        }
+      ],
+      "planning": {
+        "plan_id": "mcplan-dev-6614",
+        "path": "mission-control/plans/2026/10/DEV-6614-repository-db-semantic-publish-merge.yaml",
+        "source": "mission-control",
+        "role": "planning_source"
+      },
+      "source": "mission-control",
+      "outcome": "The engine now structurally merges only proven-disjoint canonical YAML changes in its temporary send lane, preserves hard conflicts for unsafe cases, and allows retry only for the engine-recorded clean pending-send lane. The reviewed implementation was rebase-merged to main in c284970dc592cfe41aedb9d524b11c2dfa7d84c5.",
+      "completed_at": "2026-10-06",
+      "completed_by": "henry",
+      "evidence": [
+        {
+          "label": "Repository DB PR #14",
+          "path": "https://github.com/Lazurio/repository-db/pull/14"
+        },
+        {
+          "label": "Merged main commit",
+          "path": "c284970dc592cfe41aedb9d524b11c2dfa7d84c5"
+        },
+        {
+          "label": "Exact-head validation",
+          "path": "bun test: 176 pass, 0 fail; bunx tsc --noEmit: pass"
+        }
+      ]
+    },
+    {
+      "id": "task-2026-10-04-802",
+      "title": "Integrate repository-db semantic conflict handling in Deals v3 and recover the held publish",
+      "status": "done",
+      "priority": "urgent",
+      "priority_rank": 2,
+      "assignee": "agent",
+      "priority_decider": "henry",
+      "priority_reason": "A library-only commit did not restore the hosted Deals operator flow until its pinned consumer and UI used the new contract.",
+      "created_at": "2026-10-03",
+      "updated_at": "2026-10-06",
+      "tags": [
+        "DEV-6614",
+        "mission-control",
+        "deals-v3",
+        "repository-db",
+        "draft-panel",
+        "recovery"
+      ],
+      "dev_code": "DEV-6614",
+      "summary": "Pin Deals to the reviewed library commit, show true conflict versus waiting-record counts, verify a synthetic end-to-end retry and then recover the held production batch through the standard lifecycle.",
+      "risk_notes": [
+        "Active Deals data stayed read-only until engine and consumer evidence was complete."
+      ],
+      "acceptance_criteria": [
+        "Deals panel distinguishes actual conflict paths from all pending draft resources.",
+        "Workspace-shaped Deals gates and synthetic retry pass on the pinned engine commit.",
+        "Active batch recovery meets the full repository-db post-send parity and validation gate."
+      ],
+      "links": [
+        {
+          "label": "Mission Control plan",
+          "path": "mission-control/plans/2026/10/DEV-6614-repository-db-semantic-publish-merge.yaml"
+        },
+        {
+          "label": "Deals pull request",
+          "path": "https://github.com/Spectoda/deals/pull/116"
+        }
+      ],
+      "planning": {
+        "plan_id": "mcplan-dev-6614",
+        "path": "mission-control/plans/2026/10/DEV-6614-repository-db-semantic-publish-merge.yaml",
+        "source": "mission-control",
+        "role": "planning_source"
+      },
+      "source": "mission-control",
+      "outcome": "Deals root and app/v3 now pin the immutable retry-safe engine commit. The earlier held data publish was recovered through the supported lifecycle without rewriting remote business values; deals-data v3 remains clean at 5bed5fdfb3b410766765127525e287d2711e60db. The consumer was rebase-merged in d24f88bc7836c913fff97b9002b3420c9a852b13 and the managed Deals v3 runtime was restarted from current main after dependency byte-parity and a 400-test validation gate.",
+      "completed_at": "2026-10-06",
+      "completed_by": "henry",
+      "evidence": [
+        {
+          "label": "Deals PR #116",
+          "path": "https://github.com/Spectoda/deals/pull/116"
+        },
+        {
+          "label": "Merged main commit",
+          "path": "d24f88bc7836c913fff97b9002b3420c9a852b13"
+        },
+        {
+          "label": "Deals data recovery commit",
+          "path": "5bed5fdfb3b410766765127525e287d2711e60db"
+        },
+        {
+          "label": "Runtime validation",
+          "path": "bun run validate:v3:app: 400 pass, 0 fail; origin Host smoke: 200 Deals v3 | Spectoda"
+        }
+      ]
+    }
+  ]
+}
