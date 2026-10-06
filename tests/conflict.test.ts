@@ -165,35 +165,45 @@ describe("integration conflicts happen in the lane, never in the checkout", () =
 
 			writeFixtureDocument(fixture.mountPath, "thing-1", {
 				...base,
-				amount: 110,
+				stage: "cancelled",
 				updatedAt: "2026-10-03T10:00:00.000Z",
 				updatedByName: "Local editor",
 			});
-			git(fixture.mountPath, ["add", "--all"]);
-			git(fixture.mountPath, ["commit", "--message", "local retry field"]);
+			const db = RepositoryDb.open(fixture.mountPath);
+			await expect(
+				db.publish({ actor: "a <a@a>", source: "test", expectedRevision: db.draftRevision() }),
+			).rejects.toThrow(/publish stopped/);
 			const head = git(fixture.mountPath, ["rev-parse", "HEAD"]).trim();
-			const { writeConflictState } = await import("../src/conflict.ts");
-			writeConflictState(fixture.mountPath, {
-				detectedAt: "2026-10-04T10:00:00.000Z",
+			expect(db.conflict()).toMatchObject({
 				operation: "publish",
-				gitState: "fixture conflict",
-				message: "fixture conflict",
-				paths: ["data/things/thing-1.yaml"],
 				pendingHead: head,
 				retryable: true,
-				handoff: "fixture",
+				paths: ["data/things/thing-1.yaml"],
 			});
-
-			const db = RepositoryDb.open(fixture.mountPath);
 			await expect(db.retryConflictSend({ expectedHead: "not-the-displayed-head" })).rejects.toThrow(
 				/no longer the one that was shown/,
 			);
 			expect(db.conflict()).toBeDefined();
+
+			// A colleague resolves the competing business value on the remote. The
+			// existing engine marker may now retry the same pending commit; it must
+			// still use the normal three-way lane rather than clear the conflict.
+			const third = cloneFixture(fixture, "retry-converged-remote");
+			writeFixtureDocument(third, "thing-1", {
+				...base,
+				stage: "cancelled",
+				updatedAt: "2026-10-04T10:00:00.000Z",
+				updatedByName: "Remote resolver",
+			});
+			git(third, ["add", "--all"]);
+			git(third, ["commit", "--message", "converge retry value"]);
+			git(third, ["push", "origin", fixture.branch]);
+
 			const result = await db.retryConflictSend({ expectedHead: head });
 			expect(result.state).toBe("published");
 			expect(db.conflict()).toBeUndefined();
-			expect(readThing(fixture.mountPath, "thing-1")).toContain("amount: 110");
-			expect(readThing(fixture.mountPath, "thing-1")).toContain("stage: approved");
+			expect(readThing(fixture.mountPath, "thing-1")).toContain("stage: cancelled");
+			expect(readThing(fixture.mountPath, "thing-1")).toContain("updatedByName: Remote resolver");
 			expect((await db.statusAsync({ fetch: true })).state).toBe("published");
 		} finally {
 			rmSync(fixture.root, { recursive: true, force: true });

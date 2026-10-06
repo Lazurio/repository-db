@@ -368,7 +368,11 @@ async function send(
 					paths: lane.paths,
 					...(Object.keys(unresolvedFields).length > 0 ? { unresolvedFields } : {}),
 					pendingHead: head,
-					retryable: false,
+					// The failed integration happened entirely in the engine-owned
+					// disposable lane. The live checkout still holds the exact pending
+					// commit and has no Git operation, so a later explicit retry may
+					// safely re-fetch and re-run this same fail-closed integration.
+					retryable: true,
 					handoff: laneConflictHandoff(mountRoot, branch),
 				});
 				throw new RepositoryDbError("publish_conflict", `${state.message}\n\n${state.handoff}`);
