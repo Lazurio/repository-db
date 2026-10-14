@@ -19,14 +19,17 @@ import { computeDraftRevision } from "./draftRevision.ts";
 import {
 	type DraftOriginKind,
 	type DraftOwner,
-	clearDraftProvenance,
 	readDraftOwner,
 	recordDraftOrigin,
 } from "./origin.ts";
 import { type ReviewOptions, computeReviewSnapshot } from "./review.ts";
-import { gitFetchAsync } from "./git.ts";
-import { runValidateCommands } from "./generated.ts";
-import { finishSend, publish, pullRemote, retryConflictSend, type PullResult } from "./publish.ts";
+import {
+	type EnsureGeneratedResult,
+	assertDerivedOutputIgnored,
+	ensureGenerated,
+	validateCheckout,
+} from "./generated.ts";
+import { finishSend, publish, pullRemote, type PullOptions, type PullResult } from "./publish.ts";
 import {
 	deriveSyncStatus,
 	deriveSyncStatusAsync,
@@ -35,7 +38,6 @@ import {
 import type {
 	ConflictState,
 	FinishSendOptions,
-	RetryConflictSendOptions,
 	ReviewSurfaceSnapshot,
 	PublishOptions,
 	PublishResult,
@@ -50,6 +52,10 @@ import type {
  * produces local drafts in the Git working tree; `publish()` turns the
  * current draft batch into one pushed commit. All operations enforce the
  * Git boundary guard so they can never run against a parent code repo.
+ *
+ * Derived output (`generated_manifest`) is an ignored cache: call
+ * {@link ensureGenerated} before reading it. A host app usually reaches this
+ * facade through {@link createSyncHost}, which serializes its mutations.
  */
 export class RepositoryDb {
 	readonly mountRoot: string;
@@ -64,6 +70,9 @@ export class RepositoryDb {
 		const resolved = path.resolve(mountRoot);
 		const config = loadRepositoryDbConfig(resolved);
 		assertDataRepoBoundary(resolved, config);
+		// A checkout that still tracks derived output (or engine runtime files)
+		// is refused here, with the exact migration, rather than half-working.
+		assertDerivedOutputIgnored(resolved, config);
 		return new RepositoryDb(resolved, config);
 	}
 
@@ -81,14 +90,19 @@ export class RepositoryDb {
 		return deriveSyncStatusAsync(this.mountRoot, this.config, options);
 	}
 
-	async fetchAsync(): Promise<void> {
-		assertDataRepoBoundary(this.mountRoot, this.config);
-		await gitFetchAsync(this.mountRoot);
+	/**
+	 * Build the derived output if it is stale (it rarely is). Readers call this
+	 * before they read a `generated_manifest` path. A failing materializer
+	 * throws `MaterializeFailedError`; it never creates a draft.
+	 */
+	ensureGenerated(options: { force?: boolean } = {}): Promise<EnsureGeneratedResult> {
+		return ensureGenerated(this.mountRoot, this.config, options);
 	}
 
-	validate(): string[] {
+	/** Build derived output, then run the configured validators, in this checkout. */
+	validate(): Promise<string[]> {
 		assertDataRepoBoundary(this.mountRoot, this.config);
-		return runValidateCommands(this.mountRoot, this.config);
+		return validateCheckout(this.mountRoot, this.config);
 	}
 
 	/** Publish the confirmed draft revision as one commit and send it. */
@@ -96,19 +110,20 @@ export class RepositoryDb {
 		return publish(this.mountRoot, this.config, options);
 	}
 
-	/** Send the commit shown as waiting; never makes a commit of its own. */
+	/**
+	 * Send the commit shown as waiting — after a failed push, or as the retry of
+	 * a send the engine stopped with a conflict. Never makes a commit.
+	 */
 	finishSend(options: FinishSendOptions): Promise<PublishResult> {
 		return finishSend(this.mountRoot, this.config, options);
 	}
 
-	/** Retry one engine-recorded pending send after confirming its exact commit. */
-	retryConflictSend(options: RetryConflictSendOptions): Promise<PublishResult> {
-		return retryConflictSend(this.mountRoot, this.config, options);
-	}
-
-	/** Fast-forward to colleagues' published work; never merges into local work. */
-	pull(): Promise<PullResult> {
-		return pullRemote(this.mountRoot, this.config);
+	/**
+	 * Fast-forward to colleagues' published work, also under a draft of other
+	 * records; never merges into local work.
+	 */
+	pull(options: PullOptions = {}): Promise<PullResult> {
+		return pullRemote(this.mountRoot, this.config, options);
 	}
 
 	/**
@@ -161,11 +176,6 @@ export class RepositoryDb {
 	/** Coarse label for the whole draft: who wrote first after the last publish. */
 	draftOwner(): DraftOwner | undefined {
 		return readDraftOwner(this.mountRoot);
-	}
-
-	/** Drop both provenance markers; the draft they described no longer exists. */
-	clearDraftProvenance(): void {
-		clearDraftProvenance(this.mountRoot);
 	}
 
 	conflict(): ConflictState | undefined {

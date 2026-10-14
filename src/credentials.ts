@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { CredentialsError } from "./types.ts";
 
 /**
@@ -13,7 +13,18 @@ import { CredentialsError } from "./types.ts";
  * must configure an approved non-interactive provider instead: a GitHub App
  * installation, a deploy key via ssh-agent, or a preconfigured Git credential
  * helper. When none is detected the publish fails here, before any change.
+ *
+ * The check runs off the event loop (`gh auth status` asks GitHub over the
+ * network) and a successful answer is reused for a short while in this
+ * process, so a burst of publishes does not ask GitHub every time. A failed
+ * answer is never cached: signing in takes effect on the next attempt.
  */
+
+/** How long a successful check is reused in this process. */
+const CREDENTIAL_CACHE_MS = 5 * 60 * 1000;
+/** A credential command that hangs must not hold a publish. */
+const CREDENTIAL_COMMAND_TIMEOUT_MS = 15_000;
+
 
 export interface CredentialCheck {
 	ok: boolean;
@@ -33,15 +44,45 @@ function ghBin(): string {
 	return process.env.REPOSITORY_DB_GH_BIN || "gh";
 }
 
-function tryRun(cmd: string, args: string[]): { status: number; out: string } {
-	// env is passed explicitly: Bun's spawnSync does not propagate runtime
-	// process.env mutations to the child by default.
-	const result = spawnSync(cmd, args, { encoding: "utf8", env: { ...process.env } });
-	if (result.error) return { status: 127, out: result.error.message };
-	return {
-		status: result.status ?? 1,
-		out: `${result.stdout ?? ""}${result.stderr ?? ""}`,
-	};
+interface RunResult {
+	status: number;
+	out: string;
+	stdout: string;
+}
+
+function tryRun(
+	cmd: string,
+	args: string[],
+	options: { input?: string; env?: NodeJS.ProcessEnv } = {},
+): Promise<RunResult> {
+	return new Promise((resolve) => {
+		const child = execFile(
+			cmd,
+			args,
+			{
+				encoding: "utf8",
+				// env is passed explicitly: Bun's child processes do not inherit
+				// runtime process.env mutations by default.
+				env: options.env ?? { ...process.env },
+				timeout: CREDENTIAL_COMMAND_TIMEOUT_MS,
+				killSignal: "SIGKILL",
+			},
+			(error, stdout, stderr) => {
+				const out = `${stdout ?? ""}${stderr ?? ""}`;
+				if (!error) {
+					resolve({ status: 0, out, stdout: stdout ?? "" });
+					return;
+				}
+				const code = (error as NodeJS.ErrnoException).code;
+				resolve({
+					status: typeof code === "number" ? code : 127,
+					out: out || error.message,
+					stdout: stdout ?? "",
+				});
+			},
+		);
+		if (options.input !== undefined) child.stdin?.end(options.input);
+	});
 }
 
 function credentialFillInput(remote: string): string | null {
@@ -55,7 +96,7 @@ function credentialFillInput(remote: string): string | null {
 	}
 }
 
-function checkCredentialHelper(remote: string, helperDetail: string): CredentialCheck {
+async function checkCredentialHelper(remote: string, helperDetail: string): Promise<CredentialCheck> {
 	const input = credentialFillInput(remote);
 	if (!input) {
 		return {
@@ -64,8 +105,7 @@ function checkCredentialHelper(remote: string, helperDetail: string): Credential
 			detail: `git credential.helper is configured (${helperDetail}) but remote is not an HTTP(S) URL repository-db can preflight`,
 		};
 	}
-	const result = spawnSync("git", ["credential", "fill"], {
-		encoding: "utf8",
+	const result = await tryRun("git", ["credential", "fill"], {
 		input,
 		env: {
 			...process.env,
@@ -73,8 +113,8 @@ function checkCredentialHelper(remote: string, helperDetail: string): Credential
 			GCM_INTERACTIVE: "Never",
 		},
 	});
-	const stdout = result.stdout ?? "";
-	if ((result.status ?? 1) === 0 && /^username=.+$/m.test(stdout) && /^password=.+$/m.test(stdout)) {
+	const stdout = result.stdout;
+	if (result.status === 0 && /^username=.+$/m.test(stdout) && /^password=.+$/m.test(stdout)) {
 		return {
 			ok: true,
 			mechanism: "credential-helper",
@@ -88,7 +128,24 @@ function checkCredentialHelper(remote: string, helperDetail: string): Credential
 	};
 }
 
-export function checkCredentials(remote: string): CredentialCheck {
+const cache = new Map<string, { check: CredentialCheck; at: number }>();
+
+/** Forget cached answers (after a sign-out, or in tests). */
+export function clearCredentialCache(): void {
+	cache.clear();
+}
+
+export async function checkCredentials(remote: string): Promise<CredentialCheck> {
+	const key = `${ghBin()}\0${remote}`;
+	const cached = cache.get(key);
+	if (cached && Date.now() - cached.at < CREDENTIAL_CACHE_MS) return cached.check;
+	const check = await detectCredentials(remote);
+	if (check.ok) cache.set(key, { check, at: Date.now() });
+	else cache.delete(key);
+	return check;
+}
+
+async function detectCredentials(remote: string): Promise<CredentialCheck> {
 	if (isLocalRemote(remote)) {
 		return {
 			ok: true,
@@ -98,14 +155,14 @@ export function checkCredentials(remote: string): CredentialCheck {
 	}
 
 	const isGithub = isGithubRemote(remote);
-	const gh = isGithub ? tryRun(ghBin(), ["auth", "status"]) : null;
+	const gh = isGithub ? await tryRun(ghBin(), ["auth", "status"]) : null;
 	if (gh?.status === 0) {
 		return { ok: true, mechanism: "gh", detail: "gh auth status: authenticated" };
 	}
 
 	// Approved non-interactive fallbacks for hosted/client environments.
 	if (remote.startsWith("git@") || remote.startsWith("ssh://")) {
-		const ssh = tryRun("ssh-add", ["-l"]);
+		const ssh = await tryRun("ssh-add", ["-l"]);
 		if (ssh.status === 0 && ssh.out.trim() && !/no identities/i.test(ssh.out)) {
 			return {
 				ok: true,
@@ -115,7 +172,7 @@ export function checkCredentials(remote: string): CredentialCheck {
 		}
 	}
 
-	const helper = tryRun("git", ["config", "--get", "credential.helper"]);
+	const helper = await tryRun("git", ["config", "--get", "credential.helper"]);
 	if (helper.status === 0 && helper.out.trim()) {
 		return checkCredentialHelper(remote, helper.out.trim());
 	}
@@ -145,8 +202,8 @@ export function checkCredentials(remote: string): CredentialCheck {
 }
 
 /** Throw a {@link CredentialsError} before any working-tree mutation. */
-export function assertCredentials(remote: string): CredentialCheck {
-	const check = checkCredentials(remote);
+export async function assertCredentials(remote: string): Promise<CredentialCheck> {
+	const check = await checkCredentials(remote);
 	if (!check.ok) {
 		throw new CredentialsError(
 			`credential preflight failed for remote ${remote}: ${check.detail}. ` +

@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { computeDraftRevision } from "../src/draftRevision.ts";
 import { RepositoryDb } from "../src/repositoryDb.ts";
-import { deriveDraftPanel } from "../src/ui/draftPanelModel.ts";
+import { deriveDraftPanel } from "../src/draftPanel.ts";
 import { REVIEW_SURFACE_CONTRACT_VERSION } from "../src/types.ts";
 import { cloneFixture, createFixtureRepo, git, writeFixtureDocument } from "./fixtures.ts";
 
@@ -33,31 +33,13 @@ describe("nothing unsent is hidden from review", () => {
 		try {
 			const db = RepositoryDb.open(fixture.mountPath);
 			writeFixtureDocument(fixture.mountPath, "by-agent", { name: "Agent edit" });
-			db.recordOrigin(["data/things/by-agent.yaml"], { kind: "agent", actor: "Henry" });
+			db.recordOrigin(["data/things/by-agent.yaml"], { kind: "agent", actor: "Agent" });
 			git(fixture.mountPath, ["add", "data"]);
 			git(fixture.mountPath, ["commit", "--message", "publish that failed to push"]);
 			const snapshot = await db.review();
 			const change = snapshot.resources[0]?.changes[0];
 			expect(change?.technicalRefs[0]?.path).toBe("data/things/by-agent.yaml");
 			expect(change?.origin?.kind).toBe("agent");
-		} finally {
-			rmSync(fixture.root, { recursive: true, force: true });
-		}
-	});
-
-	test("an undeclared generated file in an unsent commit blocks publish readiness", async () => {
-		const fixture = createFixtureRepo();
-		try {
-			const db = RepositoryDb.open(fixture.mountPath);
-			writeFileSync(path.join(fixture.mountPath, "generated/rogue.json"), "{}\n", "utf8");
-			git(fixture.mountPath, ["add", "--all"]);
-			git(fixture.mountPath, ["commit", "--message", "committed outside publish"]);
-			const snapshot = await db.review();
-			const policy = snapshot.publishReadiness.references.find(
-				(reference) => reference.kind === "generated_policy",
-			);
-			expect(policy?.blocking).toBe(true);
-			expect(policy?.technicalRefs?.map((ref) => ref.path)).toEqual(["generated/rogue.json"]);
 		} finally {
 			rmSync(fixture.root, { recursive: true, force: true });
 		}
@@ -99,7 +81,16 @@ describe("the panel shows every change a resource groups", () => {
 		});
 		const model = deriveDraftPanel({
 			revision: "draft:x.y",
-			state: "draft",
+			status: {
+				state: "draft",
+				branch: "v3",
+				ahead: 0,
+				behind: 0,
+				dirtyPaths: ["data/deals/one.yaml", "data/deals/two.yaml"],
+				head: null,
+				conflict: false,
+				fetched: false,
+			},
 			records: [
 				{
 					resource: {
@@ -109,7 +100,6 @@ describe("the panel shows every change a resource groups", () => {
 						label: "Grouped",
 						contractMetadata: { reviewContractVersion: REVIEW_SURFACE_CONTRACT_VERSION },
 						changes: [change("one", "title"), change("two", "status")],
-						reviewState: { value: "unreviewed" },
 						fallback: { activeLevel: "resource_adapter", steps: [] },
 					},
 					technicalPath: "data/deals/one.yaml",
@@ -158,24 +148,6 @@ describe("a waiting commit is recognised without an upstream too", () => {
 });
 
 describe("auto-review follow-ups", () => {
-	test("publish does not carry an undeclared generated file in a waiting commit below a new draft", async () => {
-		const fixture = createFixtureRepo();
-		try {
-			const db = RepositoryDb.open(fixture.mountPath);
-			writeFileSync(path.join(fixture.mountPath, "generated/rogue.json"), "{}\n", "utf8");
-			git(fixture.mountPath, ["add", "--all"]);
-			git(fixture.mountPath, ["commit", "--message", "committed outside publish"]);
-			writeFixtureDocument(fixture.mountPath, "new-draft", { name: "New draft" });
-			const remoteBefore = git(fixture.originPath, ["rev-parse", fixture.branch]).trim();
-			await expect(
-				db.publish({ actor: "a <a@a>", source: "test", expectedRevision: db.draftRevision() }),
-			).rejects.toMatchObject({ code: "generated_policy" });
-			expect(git(fixture.originPath, ["rev-parse", fixture.branch]).trim()).toBe(remoteBefore);
-		} finally {
-			rmSync(fixture.root, { recursive: true, force: true });
-		}
-	});
-
 	test("discarding a draft that holds a nested repository is refused before anything changes", () => {
 		const fixture = createFixtureRepo();
 		try {
@@ -221,8 +193,8 @@ describe("auto-review follow-ups", () => {
 	});
 });
 
-describe("the bootstrap placeholder is not generated output", () => {
-	test("without an upstream, generated/.gitkeep neither blocks readiness nor the send", async () => {
+describe("a first publish whose push failed", () => {
+	test("without an upstream, the waiting commit can still be sent", async () => {
 		const fixture = createFixtureRepo();
 		try {
 			const db = RepositoryDb.open(fixture.mountPath);
@@ -235,9 +207,7 @@ describe("the bootstrap placeholder is not generated output", () => {
 			git(fixture.mountPath, ["update-ref", "-d", `refs/remotes/origin/${fixture.branch}`]);
 
 			const snapshot = await db.review();
-			expect(
-				snapshot.publishReadiness.references.filter((ref) => ref.kind === "generated_policy"),
-			).toEqual([]);
+			expect(snapshot.publishReadiness.canPublish).toBe(true);
 			const result = await db.finishSend({ expectedHead: head });
 			expect(result.state).toBe("published");
 			expect(git(fixture.originPath, ["rev-parse", fixture.branch]).trim()).toBe(head);
@@ -344,7 +314,7 @@ describe("changed paths are reported as they are named on disk", () => {
 });
 
 describe("a conflict recorded by an older engine", () => {
-	test("abort says exactly how to restore the stashed draft", () => {
+	test("abort is refused with a clean-the-checkout handoff; nothing is moved", () => {
 		const fixture = createFixtureRepo();
 		try {
 			const db = RepositoryDb.open(fixture.mountPath);
@@ -374,12 +344,16 @@ describe("a conflict recorded by an older engine", () => {
 				"utf8",
 			);
 
+			const head = git(fixture.mountPath, ["rev-parse", "HEAD"]).trim();
 			expect(() => db.abortConflict()).toThrow(
 				expect.objectContaining({
-					code: "abort_incomplete",
-					message: expect.stringContaining(`git stash apply ${stash}`),
+					code: "legacy_engine_state",
+					message: expect.stringContaining("Clean the checkout by hand"),
 				}),
 			);
+			// The stash an older engine left is untouched, and so is the checkout.
+			expect(git(fixture.mountPath, ["rev-parse", "stash@{0}"]).trim()).toBe(stash);
+			expect(git(fixture.mountPath, ["rev-parse", "HEAD"]).trim()).toBe(head);
 		} finally {
 			rmSync(fixture.root, { recursive: true, force: true });
 		}

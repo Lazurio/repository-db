@@ -115,3 +115,70 @@ export function fakeFailingGh(root: string): string {
 	writeFileSync(binPath, "#!/bin/sh\nexit 1\n", { encoding: "utf8", mode: 0o755 });
 	return binPath;
 }
+
+/** Repo-relative path of the derived artifact the derived fixture declares. */
+export const DERIVED_PATH = "generated/summary";
+export const DERIVED_FILE = "generated/summary/ids.txt";
+
+/**
+ * Fixture with derived output, built the way real data repos build it: a
+ * materializer and a validator that live in the data repo and run with
+ * cwd = the checkout.
+ *
+ *   - the materializer lists the records into generated/summary/ids.txt and
+ *     fails when a record named `broken` exists;
+ *   - the validator refuses two records sharing one `code`, which each side of
+ *     a concurrent publish can pass on its own while their union does not.
+ */
+export function createDerivedFixture(branch = "v3"): FixtureRepo {
+	const root = mkdtempSync(path.join(os.tmpdir(), "repository-db-test-"));
+	const originPath = path.join(root, "origin.git");
+	mkdirSync(originPath);
+	git(root, ["init", "--bare", "--initial-branch", branch, "origin.git"]);
+
+	const mountPath = path.join(root, "mount");
+	git(root, ["clone", originPath, "mount"]);
+	configureIdentity(mountPath);
+	git(mountPath, ["checkout", "-B", branch]);
+
+	writeFileSync(
+		path.join(mountPath, CONFIG_FILE_NAME),
+		toStableYaml(
+			fixtureConfigValue(originPath, branch, {
+				generated_manifest: [{ path: DERIVED_PATH, materializer: "sh scripts/materialize.sh" }],
+				validate: ["sh scripts/validate.sh"],
+			}),
+		),
+		"utf8",
+	);
+	writeFileSync(path.join(mountPath, ".gitignore"), "/.repository-db/\n/generated/\n", "utf8");
+	for (const dir of ["data/things", "scripts"]) {
+		mkdirSync(path.join(mountPath, dir), { recursive: true });
+	}
+	writeFileSync(path.join(mountPath, "data/things/.gitkeep"), "", "utf8");
+	writeFileSync(
+		path.join(mountPath, "scripts/materialize.sh"),
+		[
+			"set -e",
+			"if [ -f data/things/broken.yaml ]; then echo 'broken record' >&2; exit 3; fi",
+			`mkdir -p ${DERIVED_PATH}`,
+			`ls data/things | grep '\\.yaml$' | sort > ${DERIVED_FILE}`,
+			"",
+		].join("\n"),
+		"utf8",
+	);
+	writeFileSync(
+		path.join(mountPath, "scripts/validate.sh"),
+		[
+			"set -e",
+			"dups=$(cat data/things/*.yaml 2>/dev/null | grep '^  code:' | sort | uniq -d)",
+			'if [ -n "$dups" ]; then echo "duplicate code: $dups" >&2; exit 4; fi',
+			"",
+		].join("\n"),
+		"utf8",
+	);
+	git(mountPath, ["add", "--all"]);
+	git(mountPath, ["commit", "--message", "fixture: bootstrap with derived output"]);
+	git(mountPath, ["push", "--set-upstream", "origin", branch]);
+	return { root, originPath, mountPath, branch };
+}

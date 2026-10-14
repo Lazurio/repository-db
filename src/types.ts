@@ -2,7 +2,7 @@
  * Shared types of the repository-db engine.
  *
  * The engine is intentionally domain-agnostic: it knows about Git, YAML
- * documents, collections, generated read models and the publish lifecycle.
+ * documents, collections, derived output and the publish lifecycle.
  * Domain schemas are injected by the host application through
  * the {@link DocumentParser} contract, which is structurally compatible with
  * Zod schemas without depending on Zod.
@@ -16,16 +16,26 @@ export interface DocumentParser<T> {
 export interface RepositoryDbLayout {
 	/** Directory with canonical collection data, relative to the mount root. */
 	data: string;
-	/** Directory with committed generated read models, relative to the mount root. */
+	/**
+	 * Conventional home of derived output, relative to the mount root. `init`
+	 * ignores it in Git. Only `generated_manifest` entries are derived output to
+	 * the engine; a tracked file elsewhere in this directory is ordinary data.
+	 */
 	generated: string;
 	/** Directory with data-repo-local maintenance scripts, relative to the mount root. */
 	scripts: string;
 }
 
 export interface GeneratedManifestEntry {
-	/** Path of the committed generated artifact, relative to the mount root. */
+	/**
+	 * Path of a derived artifact (file or directory), relative to the mount root.
+	 * It is never tracked: the data repo ignores it and the engine rebuilds it.
+	 */
 	path: string;
-	/** Command materializing the artifact, executed with cwd = mount root. */
+	/**
+	 * Command building the artifact, executed with cwd = mount root. It reads
+	 * only from the data checkout and writes only to declared paths.
+	 */
 	materializer?: string;
 	/** Human note about what the artifact contains. */
 	note?: string;
@@ -49,11 +59,14 @@ export interface RepositoryDbConfig {
 	};
 	layout: RepositoryDbLayout;
 	/**
-	 * Declared committed generated read models. Generated diffs outside these
-	 * paths are refused by publish.
+	 * Declared derived output: an ignored cache the engine builds in the live
+	 * checkout ({@link GeneratedManifestEntry}). Never part of a draft.
 	 */
 	generatedManifest: GeneratedManifestEntry[];
-	/** Validation commands executed by `repository-db validate` (cwd = mount root). */
+	/**
+	 * Validation commands run before every publish and after integrating a
+	 * colleague's work (cwd = mount root; they must not reach outside it).
+	 */
 	validate: string[];
 }
 
@@ -74,6 +87,8 @@ export interface SyncStatus {
 	behind: number;
 	/** Uncommitted (draft) paths relative to the mount root. */
 	dirtyPaths: string[];
+	/** Current local commit; the one a waiting send must name. Null before the first commit. */
+	head: string | null;
 	/** True when a rebase/merge is in progress or a conflict state is recorded. */
 	conflict: boolean;
 	/** True when `git fetch` was executed as part of this status call. */
@@ -86,26 +101,15 @@ export interface JsonObject {
 	[key: string]: JsonValue;
 }
 
-/**
- * Current public Review Surface representation contract.
- *
- * Persisted review marks should include this value in their invalidation key so
- * a future incompatible contract can clear stale reviewed state safely.
- */
+/** Current public Review Surface representation contract. */
 export const REVIEW_SURFACE_CONTRACT_VERSION = "repository-db.review-surface.v1" as const;
 
 /** The coarse file/resource change kinds surfaced by review adapters. */
-export type ResourceChangeKind =
-	| "created"
-	| "modified"
-	| "deleted"
-	| "generated"
-	| "unknown";
+export type ResourceChangeKind = "created" | "modified" | "deleted" | "unknown";
 
 /** Where a path reference comes from; paths are technical metadata, not labels. */
 export type ReviewTechnicalReferenceKind =
 	| "canonical_data_path"
-	| "generated_path"
 	| "supporting_path"
 	| "unknown_path";
 
@@ -134,15 +138,6 @@ export type ReviewFieldChangeKind =
 	| "deleted"
 	| "unchanged"
 	| "unknown";
-
-export interface ReviewUiAnchor {
-	/** Host-app stable anchor id for row/card/detail/field highlighting. */
-	id: string;
-	/** Optional host-app route when a field has a more precise target. */
-	routeTarget?: ReviewRouteTarget;
-	/** Optional non-secret hint consumed by the host UI. */
-	hint?: string;
-}
 
 /** App-agnostic value categories used to render field summaries safely. */
 export type ReviewFieldValueKind =
@@ -184,8 +179,6 @@ export interface ReviewFieldSummary {
 	beforeSummary?: string;
 	/** Deterministic short display value for review lists; raw diff can be lazy. */
 	afterSummary?: string;
-	/** Optional UI anchor for inline draft highlighting. */
-	uiAnchor?: ReviewUiAnchor;
 }
 
 /**
@@ -213,16 +206,14 @@ export interface ResourceChange {
 	/** Stable within one draft/review computation; shared by panels, rows and publish readiness. */
 	changeId: string;
 	kind: ResourceChangeKind;
-	/** Deterministic app/schema summary, e.g. field count or generated artifact note. */
+	/** Deterministic app/schema summary, e.g. a field count. */
 	summary: string;
 	/** Technical file evidence kept for developer details, Git review and agents. */
 	technicalRefs: ReviewTechnicalReference[];
 	/** Structural field summary; empty when only a raw technical diff is known. */
 	fields: ReviewFieldSummary[];
-	/** Draft representation hash used to invalidate reviewed state after edits. */
+	/** Hash of the draft content this change describes. */
 	draftContentHash?: string;
-	/** Source technical refs for generated outputs, when known. */
-	generatedFrom?: ReviewTechnicalReference[];
 	/** Informational provenance; never gates an operation. */
 	origin?: ReviewChangeOrigin;
 }
@@ -233,7 +224,7 @@ export interface ReviewInputChange {
 	/** Stable raw change id before an app adapter enriches the review representation. */
 	changeId: string;
 	kind: ReviewInputChangeKind;
-	/** Current technical refs for the dirty/generated/unknown path. */
+	/** Current technical refs for the changed path. */
 	technicalRefs: ReviewTechnicalReference[];
 	/** Previous refs for moves/renames when a caller can detect them. */
 	previousTechnicalRefs?: ReviewTechnicalReference[];
@@ -252,8 +243,6 @@ export interface ReviewInputChange {
 	 * a stalled request on a large draft.
 	 */
 	baselineText?: string;
-	/** Source technical refs for generated outputs, when known. */
-	generatedFrom?: ReviewTechnicalReference[];
 	/** Informational provenance; never gates an operation. */
 	origin?: ReviewChangeOrigin;
 	/** Non-secret JSON metadata for diagnostics; not a UI label. */
@@ -284,40 +273,6 @@ export interface ReviewFallbackLadder {
 	steps: ReviewFallbackStep[];
 }
 
-export type ReviewStateValue =
-	| "unreviewed"
-	| "reviewed"
-	| "stale"
-	| "blocked"
-	| "not_required";
-
-export interface ReviewedStateKey {
-	/** Baseline HEAD used when the draft review representation was computed. */
-	baselineHead: string;
-	/** Stable app/resource id; never a filesystem path. */
-	stableResourceId: string;
-	/** Resource-related paths included only to invalidate moves/renames. */
-	resourcePaths: string[];
-	/** Hash of the draft review representation or backing draft content. */
-	draftContentHash: string;
-	/** Review contract version, usually REVIEW_SURFACE_CONTRACT_VERSION. */
-	reviewContractVersion: string;
-	/** Semantic adapter version; bump only for review-invalidating changes. */
-	adapterVersion?: string;
-	/** Semantic schema version; bump when field meaning/shape invalidates review. */
-	schemaVersion?: string;
-}
-
-export interface ReviewState {
-	value: ReviewStateValue;
-	/** Persistence/invalidation key for durable reviewed marks. */
-	key?: ReviewedStateKey;
-	reviewedAt?: string;
-	reviewedBy?: string;
-	/** Human or deterministic reason for blocked/stale/not-required states. */
-	reason?: string;
-}
-
 export interface ReviewSurfaceContractMetadata {
 	/** Review representation contract that shaped this resource. */
 	reviewContractVersion: string;
@@ -336,9 +291,7 @@ export interface ReviewSurfaceContractMetadata {
 export type PublishReadinessReferenceKind =
 	| "schema_error"
 	| "conflict"
-	| "unreviewed_change"
 	| "validation_error"
-	| "generated_policy"
 	| "unknown";
 
 export interface PublishReadinessReference {
@@ -378,10 +331,9 @@ export interface ReviewableResource {
 	routeTarget?: ReviewRouteTarget;
 	/** Version identity for the representation shown to reviewers. */
 	contractMetadata?: ReviewSurfaceContractMetadata;
-	/** Hash of the visible review representation for invalidating stale marks. */
+	/** Hash of the visible review representation. */
 	reviewRepresentationHash?: string;
 	changes: ResourceChange[];
-	reviewState: ReviewState;
 	fallback: ReviewFallbackLadder;
 	/** Blocking/non-blocking references shown in the final publish summary. */
 	publishReadiness?: PublishReadinessReference[];
@@ -461,26 +413,14 @@ export interface PublishOptions {
 	summary?: string;
 	/** Optional entity identifiers recorded in the optional trailer. */
 	entities?: string[];
-	/** Skip the validate step (used by tests and trusted callers only). */
-	skipValidate?: boolean;
-	/** Skip materializer commands (used when the caller already materialized). */
-	skipMaterialize?: boolean;
 }
 
 export interface FinishSendOptions {
 	/**
 	 * The commit waiting to be sent, as it was shown. Finishing a send pushes
-	 * exactly the commits up to this one and never makes a new commit.
+	 * exactly the commits up to this one and never makes a new commit. The same
+	 * call retries a send the engine stopped with a recorded conflict.
 	 */
-	expectedHead: string;
-}
-
-/**
- * Retry an engine-recorded, clean pending send. The caller must carry the exact
- * waiting commit the operator reviewed; external Git operations are never
- * eligible for this retry path.
- */
-export interface RetryConflictSendOptions {
 	expectedHead: string;
 }
 
@@ -497,8 +437,22 @@ export interface PublishResult {
 	remoteChanges?: string[];
 }
 
+/**
+ * Why the engine stopped a send:
+ *
+ *   - `merge`      — a colleague changed the same record and the semantic merge
+ *                    could not prove the combination safe;
+ *   - `validation` — the integrated result (local work on top of the
+ *                    colleague's) failed the materializers or validators.
+ *
+ * In both cases the live checkout holds the local commit, unchanged.
+ */
+export type ConflictKind = "merge" | "validation";
+
 export interface ConflictState {
 	schemaVersion: "repository-db.conflict.v1";
+	/** Engine send conflicts carry it; external Git state and older records do not. */
+	kind?: ConflictKind;
 	detectedAt: string;
 	operation: string;
 	gitState: string;
@@ -508,9 +462,9 @@ export interface ConflictState {
 	paths?: string[];
 	/** Structural JSON-pointer paths the semantic YAML merger could not prove safe. */
 	unresolvedFields?: Record<string, string[]>;
-	/** Exact local commit eligible for an engine-managed retry, when recorded. */
+	/** Exact local commit a retry (`finishSend`) must name. */
 	pendingHead?: string;
-	/** True only for repository-db's isolated send-lane conflict, never external Git state. */
+	/** True only for a conflict the engine recorded while sending, never external Git state. */
 	retryable?: boolean;
 }
 
@@ -571,5 +525,60 @@ export class ValidationFailedError extends RepositoryDbError {
 	constructor(message: string) {
 		super("validation_failed", message);
 		this.name = "ValidationFailedError";
+	}
+}
+
+/**
+ * A materializer declared in `generated_manifest` failed. Readers get it from
+ * `ensureGenerated()`; publish is refused with it. Nothing was staged and no
+ * draft was created.
+ */
+export class MaterializeFailedError extends RepositoryDbError {
+	/** The manifest entry whose materializer failed. */
+	readonly entryPath: string;
+
+	constructor(entryPath: string, message: string) {
+		super("materialize_failed", message);
+		this.name = "MaterializeFailedError";
+		this.entryPath = entryPath;
+	}
+}
+
+/**
+ * The data checkout still tracks something the engine owns as a local cache:
+ * a declared derived path, or the engine's own runtime directory. Derived
+ * output is rebuilt by the engine and must never be in Git.
+ */
+export class TrackedDerivedOutputError extends RepositoryDbError {
+	/** Paths that are tracked or not ignored. */
+	readonly paths: string[];
+	/** The exact migration, as commands. */
+	readonly migration: string[];
+
+	constructor(code: string, message: string, paths: string[], migration: string[]) {
+		super(code, message);
+		this.name = "TrackedDerivedOutputError";
+		this.paths = paths;
+		this.migration = migration;
+	}
+}
+
+/**
+ * A pull refused because colleagues changed records this draft also changes.
+ * Nothing was pulled. The way out: revert those records, pull, redo the edit.
+ */
+export class PullBlockedError extends RepositoryDbError {
+	/** Drafted paths the incoming work also changes; empty when Git refused for another reason. */
+	readonly paths: string[];
+
+	constructor(paths: string[], detail?: string) {
+		super(
+			"pull_blocked_by_draft",
+			paths.length > 0
+				? `Colleagues published changes to records this draft also changes (${paths.join(", ")}); nothing was pulled. Revert those records, pull, then make the edit again on top of their version — or publish the draft first.`
+				: `Colleagues published changes that cannot be fast-forwarded under this draft; nothing was pulled. Revert the affected records or publish the draft first.${detail ? ` Detail: ${detail}` : ""}`,
+		);
+		this.name = "PullBlockedError";
+		this.paths = paths;
 	}
 }

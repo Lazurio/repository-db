@@ -106,6 +106,20 @@ export function computeDraftRevisionParts(mountRoot: string): DraftRevisionParts
 	};
 }
 
+/**
+ * What the tracked checkout holds right now, independent of history: the tree
+ * of the current commit plus the bytes of every draft path. Derived output is
+ * built from exactly this, so it is the staleness key of the derived cache.
+ *
+ * A tree rather than a commit: replaying the same content onto a new parent
+ * (a send that integrated nothing new for the materializer) needs no rebuild.
+ * Derived paths are ignored by Git, so they never feed their own key.
+ */
+export function computeContentState(mountRoot: string): string {
+	const tree = runGit(mountRoot, ["rev-parse", "--verify", "--quiet", "HEAD^{tree}"]).stdout.trim();
+	return `content:${tree || "no-tree"}.${contentHash(mountRoot, draftPaths(mountRoot))}`;
+}
+
 export function formatDraftRevision(parts: DraftRevisionParts): string {
 	return `${REVISION_PREFIX}${parts.baseline}.${parts.content}`;
 }

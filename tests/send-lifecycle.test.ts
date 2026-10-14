@@ -18,7 +18,7 @@ function rejectPushesWhile(fixture: { root: string; originPath: string }): strin
 	return marker;
 }
 
-/** A materializer whose output differs on every run, so any run is visible. */
+/** A materializer whose output differs on every run, so any run is visible; its output is ignored. */
 function useStampMaterializer(fixture: { mountPath: string; originPath: string; branch: string }): void {
 	const materializer = "sh -c 'date +%s%N > generated/stamp.txt'";
 	writeFileSync(
@@ -37,6 +37,7 @@ function useStampMaterializer(fixture: { mountPath: string; originPath: string; 
 		].join("\n"),
 		"utf8",
 	);
+	writeFileSync(path.join(fixture.mountPath, ".gitignore"), "/.repository-db/\n/generated/stamp.txt\n", "utf8");
 	git(fixture.mountPath, ["add", "--all"]);
 	git(fixture.mountPath, ["commit", "--message", "stamp materializer"]);
 	git(fixture.mountPath, ["push", "--quiet", "origin", fixture.branch]);
@@ -94,7 +95,7 @@ describe("a failed send leaves one waiting commit; finishing it is a separate op
 		}
 	});
 
-	test("when a colleague published in between, finishing replays the same commit onto their work without adding one", async () => {
+	test("when a colleague published in between, finishing replays the same commit onto their work, rebuilds derived output there and adds no commit", async () => {
 		const fixture = createFixtureRepo();
 		try {
 			useStampMaterializer(fixture);
@@ -123,7 +124,11 @@ describe("a failed send leaves one waiting commit; finishing it is a separate op
 			expect(git(fixture.mountPath, ["rev-parse", "HEAD~1"]).trim()).toBe(theirs);
 			expect(git(fixture.mountPath, ["log", "-1", "--format=%B"])).toBe(pendingMessage);
 			expect(git(fixture.originPath, ["rev-parse", fixture.branch]).trim()).toBe(result.commit ?? "");
-			expect(readFileSync(path.join(fixture.mountPath, "generated/stamp.txt"), "utf8")).toBe(stamp);
+			// The integrated content is new, so derived output was rebuilt in the
+			// live checkout before the push; it is a cache and never in Git.
+			expect(readFileSync(path.join(fixture.mountPath, "generated/stamp.txt"), "utf8")).not.toBe(stamp);
+			expect(git(fixture.originPath, ["ls-tree", "-r", "--name-only", fixture.branch])).not.toContain("stamp.txt");
+			expect(db.status().dirtyPaths).toEqual([]);
 			expect(existsSync(path.join(fixture.mountPath, "data/things/theirs.yaml"))).toBe(true);
 		} finally {
 			rmSync(fixture.root, { recursive: true, force: true });
@@ -177,24 +182,6 @@ describe("a failed send leaves one waiting commit; finishing it is a separate op
 			const status = db.status();
 			expect(status.state).toBe("published");
 			expect(status.ahead).toBe(0);
-		} finally {
-			rmSync(fixture.root, { recursive: true, force: true });
-		}
-	});
-
-	test("a waiting commit with an undeclared generated file is not sent", async () => {
-		const fixture = createFixtureRepo();
-		try {
-			const db = RepositoryDb.open(fixture.mountPath);
-			writeFileSync(path.join(fixture.mountPath, "generated/rogue.json"), "{}\n", "utf8");
-			git(fixture.mountPath, ["add", "--all"]);
-			git(fixture.mountPath, ["commit", "--message", "committed outside publish"]);
-			const head = git(fixture.mountPath, ["rev-parse", "HEAD"]).trim();
-			const remoteBefore = git(fixture.originPath, ["rev-parse", fixture.branch]).trim();
-			await expect(db.finishSend({ expectedHead: head })).rejects.toMatchObject({
-				code: "generated_policy",
-			});
-			expect(git(fixture.originPath, ["rev-parse", fixture.branch]).trim()).toBe(remoteBefore);
 		} finally {
 			rmSync(fixture.root, { recursive: true, force: true });
 		}

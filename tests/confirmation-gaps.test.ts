@@ -6,9 +6,24 @@ import { DraftChangedError } from "../src/discard.ts";
 import { computeDraftRevision, parseDraftRevision } from "../src/draftRevision.ts";
 import { acquirePublishLock, withDraftWriteLock } from "../src/lock.ts";
 import { RepositoryDb } from "../src/repositoryDb.ts";
+import type { SyncStatus } from "../src/types.ts";
 import { cloneFixture, createFixtureRepo, git, writeFixtureDocument } from "./fixtures.ts";
 
 const ACTOR = "Anna <anna@example.com>";
+
+function panelStatus(state: SyncStatus["state"], extra: Partial<SyncStatus> = {}): SyncStatus {
+	return {
+		state,
+		branch: "v3",
+		ahead: state === "committed_not_pushed" ? 1 : 0,
+		behind: 0,
+		dirtyPaths: [],
+		head: "c".repeat(40),
+		conflict: state === "conflict",
+		fetched: false,
+		...extra,
+	};
+}
 
 function publishBaseline(fixture: { mountPath: string; branch: string }): void {
 	git(fixture.mountPath, ["add", "--all"]);
@@ -54,7 +69,6 @@ describe("the confirmed revision covers the whole publish", () => {
 					actor: ACTOR,
 					source: "test",
 					expectedRevision: confirmed,
-					skipValidate: true,
 				}),
 			).rejects.toThrow(DraftChangedError);
 
@@ -79,12 +93,11 @@ describe("the confirmed revision covers the whole publish", () => {
 						actor: ACTOR,
 						source: "test",
 						expectedRevision: expectedRevision as string,
-						skipValidate: true,
 					}),
 				).rejects.toThrow(/pass the revision that was shown/);
 			}
 			await expect(
-				db.publish({ actor: ACTOR, source: "test", expectedRevision: "draft:x.y", skipValidate: true }),
+				db.publish({ actor: ACTOR, source: "test", expectedRevision: "draft:x.y" }),
 			).rejects.toThrow(DraftChangedError);
 			expect(db.status().state).toBe("draft");
 		} finally {
@@ -306,14 +319,9 @@ describe("whole-draft discard only removes what was confirmed", () => {
 
 describe("the panel does not offer what the host cannot do", () => {
 	test("an unwired recovery action is disabled with a reason", async () => {
-		const { deriveDraftPanel } = await import("../src/ui/draftPanelModel.ts");
+		const { deriveDraftPanel } = await import("../src/draftPanel.ts");
 		const model = deriveDraftPanel(
-			{
-				revision: "draft:a.b",
-				state: "committed_not_pushed",
-				pendingHead: "c".repeat(40),
-				records: [],
-			},
+			{ revision: "draft:a.b", status: panelStatus("committed_not_pushed"), records: [] },
 			{ finishSend: false },
 		);
 		const finish = model.actions.find((action) => action.kind === "finish_send");
@@ -322,14 +330,9 @@ describe("the panel does not offer what the host cannot do", () => {
 	});
 
 	test("a wired action stays available and carries the pending commit", async () => {
-		const { deriveDraftPanel } = await import("../src/ui/draftPanelModel.ts");
+		const { deriveDraftPanel } = await import("../src/draftPanel.ts");
 		const model = deriveDraftPanel(
-			{
-				revision: "draft:a.b",
-				state: "committed_not_pushed",
-				pendingHead: "c".repeat(40),
-				records: [],
-			},
+			{ revision: "draft:a.b", status: panelStatus("committed_not_pushed"), records: [] },
 			{ finishSend: true },
 		);
 		expect(model.actions.find((action) => action.kind === "finish_send")?.enabled).toBe(true);
@@ -338,7 +341,7 @@ describe("the panel does not offer what the host cannot do", () => {
 });
 
 describe("publishing a draft that regenerates output", () => {
-	test("a materializer rewriting generated files does not look like someone else's write", async () => {
+	test("a materializer rebuilding derived output does not look like someone else's write and is never committed", async () => {
 		const fixture = createFixtureRepo();
 		try {
 			// A declared artifact with a materializer, which is the ordinary shape
@@ -361,6 +364,7 @@ describe("publishing a draft that regenerates output", () => {
 				].join("\n"),
 				"utf8",
 			);
+			writeFileSync(path.join(fixture.mountPath, ".gitignore"), "/.repository-db/\n/generated/rollup.yaml\n", "utf8");
 			publishBaseline(fixture);
 
 			const db = RepositoryDb.open(fixture.mountPath);
@@ -373,12 +377,15 @@ describe("publishing a draft that regenerates output", () => {
 				expectedRevision: snapshot.draftRevision as string,
 			});
 
-			// The regenerated rollup is part of the publish, not a reason to refuse it.
+			// The rebuilt rollup is a cache: not a reason to refuse, not part of the publish.
 			expect(result.state).toBe("published");
 			expect(db.status().dirtyPaths).toEqual([]);
 			expect(
 				readFileSync(path.join(fixture.mountPath, "generated/rollup.yaml"), "utf8"),
 			).toContain("count:");
+			expect(git(fixture.originPath, ["ls-tree", "-r", "--name-only", fixture.branch])).not.toContain(
+				"rollup.yaml",
+			);
 		} finally {
 			rmSync(fixture.root, { recursive: true, force: true });
 		}
@@ -411,10 +418,10 @@ describe("round 2 — finishing a send must name its commit", () => {
 	});
 
 	test("the panel cannot offer finishing a send without the pending commit", async () => {
-		const { deriveDraftPanel } = await import("../src/ui/draftPanelModel.ts");
+		const { deriveDraftPanel } = await import("../src/draftPanel.ts");
 		const model = deriveDraftPanel({
 			revision: "draft:a.b",
-			state: "committed_not_pushed",
+			status: panelStatus("committed_not_pushed", { head: null }),
 			records: [],
 		});
 		const finish = model.actions.find((action) => action.kind === "finish_send");
@@ -425,7 +432,7 @@ describe("round 2 — finishing a send must name its commit", () => {
 
 describe("round 2 — no row offers a revert the engine would refuse", () => {
 	test("conflict and unsent states disable per-record revert whatever the host said", async () => {
-		const { deriveDraftPanel } = await import("../src/ui/draftPanelModel.ts");
+		const { deriveDraftPanel } = await import("../src/draftPanel.ts");
 		const record = {
 			resource: {
 				appId: "a",
@@ -441,18 +448,17 @@ describe("round 2 — no row offers a revert the engine would refuse", () => {
 						fields: [],
 					},
 				],
-				reviewState: { value: "unreviewed" as const },
 				fallback: { activeLevel: "resource_adapter" as const, steps: [] },
 			},
 			technicalPath: "data/r/1.yaml",
 			revert: { supported: true },
 		};
-		for (const input of [
-			{ state: "conflict" as const },
-			{ state: "committed_not_pushed" as const, pendingHead: "c".repeat(40) },
-			{ state: "draft" as const, ahead: 1 },
+		for (const status of [
+			panelStatus("conflict"),
+			panelStatus("committed_not_pushed"),
+			panelStatus("draft", { ahead: 1, dirtyPaths: ["data/r/1.yaml"] }),
 		]) {
-			const model = deriveDraftPanel({ revision: "draft:a.b", records: [record], ...input });
+			const model = deriveDraftPanel({ revision: "draft:a.b", records: [record], status });
 			expect(model.records[0]?.revertSupported).toBe(false);
 			expect(model.records[0]?.revertBlockedReason).toBeTruthy();
 		}
@@ -505,7 +511,7 @@ describe("round 2 — revision and review read the checkout honestly", () => {
 		}
 	});
 
-	test("a trailing slash in the layout does not hide generated changes", async () => {
+	test("a trailing slash in the layout is normalized", async () => {
 		const { parseRepositoryDbConfig } = await import("../src/config.ts");
 		const config = parseRepositoryDbConfig({
 			schema_version: "repository-db.config.v1",
@@ -651,8 +657,8 @@ describe("a rewritten rename is two ordinary rows, each revertible alone", () =>
 	});
 });
 
-describe("round 2 — declared artifacts outside generated/ do not trip the check", () => {
-	test("a materializer writing under data/ does not refuse a confirmed publish", async () => {
+describe("round 2 — declared artifacts outside generated/ are derived output too", () => {
+	test("a materializer writing an ignored path under data/ does not refuse a confirmed publish", async () => {
 		const fixture = createFixtureRepo();
 		try {
 			const materializer =
@@ -673,6 +679,7 @@ describe("round 2 — declared artifacts outside generated/ do not trip the chec
 				].join("\n"),
 				"utf8",
 			);
+			writeFileSync(path.join(fixture.mountPath, ".gitignore"), "/.repository-db/\n/data/rollups/\n", "utf8");
 			publishBaseline(fixture);
 
 			const db = RepositoryDb.open(fixture.mountPath);
@@ -684,6 +691,10 @@ describe("round 2 — declared artifacts outside generated/ do not trip the chec
 				expectedRevision: snapshot.draftRevision as string,
 			});
 			expect(result.state).toBe("published");
+			expect(readFileSync(path.join(fixture.mountPath, "data/rollups/count.txt"), "utf8").trim()).toBe("1");
+			expect(git(fixture.originPath, ["ls-tree", "-r", "--name-only", fixture.branch])).not.toContain(
+				"data/rollups",
+			);
 		} finally {
 			rmSync(fixture.root, { recursive: true, force: true });
 		}
@@ -710,6 +721,7 @@ describe("round 3 — a live local lock is never taken over by age", () => {
 				hostname: os.hostname(),
 				acquiredAt: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
 				token: "long-publish",
+				processStart: "unavailable",
 			});
 
 			expect(() => acquirePublishLock(fixture.mountPath)).toThrow(/already running/);
@@ -767,6 +779,7 @@ describe("round 3 — a live local lock is never taken over by age", () => {
 				hostname: os.hostname(),
 				acquiredAt: new Date().toISOString(),
 				token: "crashed",
+				processStart: "unavailable",
 			});
 			const release = acquirePublishLock(fixture.mountPath);
 			release();
@@ -783,6 +796,7 @@ describe("round 3 — a live local lock is never taken over by age", () => {
 				hostname: "some-other-machine",
 				acquiredAt: new Date().toISOString(),
 				token: "remote-fresh",
+				processStart: "unavailable",
 			});
 			expect(() => acquirePublishLock(fixture.mountPath)).toThrow(/already running/);
 
@@ -791,6 +805,7 @@ describe("round 3 — a live local lock is never taken over by age", () => {
 				hostname: "some-other-machine",
 				acquiredAt: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
 				token: "remote-old",
+				processStart: "unavailable",
 			});
 			const release = acquirePublishLock(fixture.mountPath);
 			release();
@@ -817,7 +832,6 @@ describe("round 3 — a confirmed publish of a staged rename does not refuse its
 				actor: ACTOR,
 				source: "test",
 				expectedRevision: snapshot.draftRevision as string,
-				skipValidate: true,
 			});
 
 			expect(result.state).toBe("published");
@@ -842,7 +856,6 @@ describe("round 3 — a confirmed publish of a staged rename does not refuse its
 				actor: ACTOR,
 				source: "test",
 				expectedRevision: snapshot.draftRevision as string,
-				skipValidate: true,
 			});
 			expect(result.state).toBe("published");
 		} finally {
@@ -934,9 +947,10 @@ describe("round 3 — an unreadable lock is never a permanent block", () => {
 });
 
 describe("round 3 — revert availability agrees with what review shows", () => {
-	test("a declared artifact outside generated/ is not a record, and blocks record reverts", () => {
+	test("derived output never stands in the way of a record revert", async () => {
 		const fixture = createFixtureRepo();
 		try {
+			const materializer = "sh -c 'mkdir -p data/rollups && ls data/things | wc -l > data/rollups/count.txt'";
 			writeFileSync(
 				path.join(fixture.mountPath, "repository-db.yaml"),
 				[
@@ -947,21 +961,23 @@ describe("round 3 — revert availability agrees with what review shows", () => 
 					"layout: {data: data, generated: generated, scripts: scripts}",
 					"generated_manifest:",
 					"  - path: data/rollups/count.txt",
+					`    materializer: ${JSON.stringify(materializer)}`,
 					"validate: []",
 					"",
 				].join("\n"),
 				"utf8",
 			);
+			writeFileSync(path.join(fixture.mountPath, ".gitignore"), "/.repository-db/\n/data/rollups/\n", "utf8");
 			writeFixtureDocument(fixture.mountPath, "record", { name: "Published" });
 			publishBaseline(fixture);
 
 			const db = RepositoryDb.open(fixture.mountPath);
 			writeFixtureDocument(fixture.mountPath, "record", { name: "Edited" });
-			mkdirSync(path.join(fixture.mountPath, "data/rollups"), { recursive: true });
-			writeFileSync(path.join(fixture.mountPath, "data/rollups/count.txt"), "2\n", "utf8");
+			await db.ensureGenerated();
 
-			expect(db.canRevertRecord("data/rollups/count.txt").reason).toContain("generated output");
-			expect(db.canRevertRecord("data/things/record.yaml").reason).toContain("generated data");
+			expect(db.status().dirtyPaths).toEqual(["data/things/record.yaml"]);
+			expect(db.canRevertRecord("data/things/record.yaml")).toEqual({ supported: true });
+			expect(db.canRevertRecord("data/rollups/count.txt").reason).toContain("not part of the current draft");
 		} finally {
 			rmSync(fixture.root, { recursive: true, force: true });
 		}
@@ -1004,6 +1020,7 @@ describe("round 3 — finishing a send runs nothing that writes the tree", () =>
 				].join("\n"),
 				"utf8",
 			);
+			writeFileSync(path.join(fixture.mountPath, ".gitignore"), "/.repository-db/\n/generated/stamp.txt\n", "utf8");
 			publishBaseline(fixture);
 
 			const db = RepositoryDb.open(fixture.mountPath);
@@ -1025,22 +1042,19 @@ describe("round 3 — finishing a send runs nothing that writes the tree", () =>
 });
 
 describe("round 3 — upgrade and concurrency around reclaiming", () => {
-	test("an own-pid lock from an older engine version ages out as before", async () => {
+	test("an own-pid lock from an older engine version is refused, fresh or old, until the checkout is cleaned", async () => {
 		const os = await import("node:os");
 		const fixture = createFixtureRepo();
 		try {
 			const lockFile = path.join(fixture.mountPath, ".repository-db", "publish.lock");
 			mkdirSync(path.dirname(lockFile), { recursive: true });
-			// Written by a predecessor on the previous engine: no processStart.
+			// Written by a predecessor on an older engine: no token, no processStart.
 			const legacy = { pid: process.pid, hostname: os.hostname() };
-			writeFileSync(lockFile, JSON.stringify({ ...legacy, acquiredAt: new Date().toISOString() }), "utf8");
-			expect(() => acquirePublishLock(fixture.mountPath)).toThrow(/already running/);
-
-			writeFileSync(
-				lockFile,
-				JSON.stringify({ ...legacy, acquiredAt: new Date(Date.now() - 60 * 60 * 1000).toISOString() }),
-				"utf8",
-			);
+			for (const acquiredAt of [new Date(), new Date(Date.now() - 60 * 60 * 1000)]) {
+				writeFileSync(lockFile, JSON.stringify({ ...legacy, acquiredAt: acquiredAt.toISOString() }), "utf8");
+				expect(() => acquirePublishLock(fixture.mountPath)).toThrow(/older repository-db\. Clean the checkout/);
+			}
+			rmSync(lockFile);
 			const release = acquirePublishLock(fixture.mountPath);
 			release();
 		} finally {
@@ -1059,7 +1073,7 @@ describe("round 3 — upgrade and concurrency around reclaiming", () => {
 			// A dead holder's lock, as the slower of two acquirers first reads it...
 			writeFileSync(
 				lockFile,
-				JSON.stringify({ pid: 2_147_483_000, hostname: os.hostname(), acquiredAt: new Date().toISOString(), token: "dead" }),
+				JSON.stringify({ pid: 2_147_483_000, hostname: os.hostname(), acquiredAt: new Date().toISOString(), token: "dead", processStart: "unavailable" }),
 				"utf8",
 			);
 			// ...while the faster acquirer has already replaced it with a live one.
@@ -1067,7 +1081,7 @@ describe("round 3 — upgrade and concurrency around reclaiming", () => {
 			const judged = JSON.parse(read(lockFile, "utf8"));
 			writeFileSync(
 				lockFile,
-				JSON.stringify({ pid: holder.pid, hostname: os.hostname(), acquiredAt: new Date().toISOString(), token: "fresh" }),
+				JSON.stringify({ pid: holder.pid, hostname: os.hostname(), acquiredAt: new Date().toISOString(), token: "fresh", processStart: "unavailable" }),
 				"utf8",
 			);
 			const lockModule = await import("../src/lock.ts");
@@ -1075,39 +1089,6 @@ describe("round 3 — upgrade and concurrency around reclaiming", () => {
 			expect(JSON.parse(read(lockFile, "utf8")).token).toBe("fresh");
 		} finally {
 			holder.kill("SIGKILL");
-			rmSync(fixture.root, { recursive: true, force: true });
-		}
-	});
-});
-
-describe("round 3 — finish-send never makes a commit of its own", () => {
-	test("a legacy tracked lock does not turn finishing into a new commit", async () => {
-		const os = await import("node:os");
-		const fixture = createFixtureRepo();
-		try {
-			// A data repo from an older engine that tracked the runtime lock.
-			writeFileSync(path.join(fixture.mountPath, ".gitignore"), "", "utf8");
-			const lockFile = path.join(fixture.mountPath, ".repository-db", "publish.lock");
-			mkdirSync(path.dirname(lockFile), { recursive: true });
-			writeFileSync(
-				lockFile,
-				JSON.stringify({ pid: 2_147_483_000, hostname: os.hostname(), acquiredAt: new Date(0).toISOString() }),
-				"utf8",
-			);
-			publishBaseline(fixture);
-			rmSync(lockFile);
-
-			const db = RepositoryDb.open(fixture.mountPath);
-			writeFixtureDocument(fixture.mountPath, "reviewed", { name: "Unsent" });
-			git(fixture.mountPath, ["add", "data"]);
-			git(fixture.mountPath, ["commit", "--message", "publish that failed to push"]);
-			const pendingHead = git(fixture.mountPath, ["rev-parse", "HEAD"]).trim();
-
-			const result = await db.finishSend({ expectedHead: pendingHead });
-			expect(result.state).toBe("published");
-			expect(git(fixture.originPath, ["rev-parse", fixture.branch]).trim()).toBe(pendingHead);
-			expect(git(fixture.mountPath, ["rev-parse", "HEAD"]).trim()).toBe(pendingHead);
-		} finally {
 			rmSync(fixture.root, { recursive: true, force: true });
 		}
 	});

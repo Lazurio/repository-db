@@ -11,22 +11,18 @@ import {
 	type ReviewFieldValueKind,
 	type ReviewInputChange,
 	type ReviewableResource,
-	type ReviewedStateKey,
 	type ReviewSurfaceContractMetadata,
-	type ReviewStateValue,
 	type ReviewSurfaceSnapshot,
 	type ReviewSurfaceAdapter,
 } from "../src/index.ts";
 
 const fixturePath = "data/fixture-records/fixture-alpha.yaml";
-const generatedPath = "generated/fixture-index.json";
 const stableResourceId = "fixture-record:alpha";
 
 const changeKinds = [
 	"created",
 	"modified",
 	"deleted",
-	"generated",
 	"unknown",
 ] satisfies ResourceChangeKind[];
 
@@ -36,14 +32,6 @@ const fallbackLevels = [
 	"technical_file_diff",
 	"unknown",
 ] satisfies ReviewFallbackLevel[];
-
-const reviewStates = [
-	"unreviewed",
-	"reviewed",
-	"stale",
-	"blocked",
-	"not_required",
-] satisfies ReviewStateValue[];
 
 const fieldValueKinds = [
 	"text",
@@ -86,23 +74,9 @@ const readinessReferences = [
 		technicalRefs: [{ path: fixturePath, kind: "canonical_data_path" }],
 	},
 	{
-		kind: "unreviewed_change",
-		blocking: true,
-		message: "Fixture resource has not been reviewed yet.",
-		changeIds: ["fixture-change:modified"],
-		stableResourceIds: [stableResourceId],
-	},
-	{
 		kind: "validation_error",
 		blocking: true,
 		message: "Fixture validation command reported a blocking issue.",
-	},
-	{
-		kind: "generated_policy",
-		blocking: false,
-		message: "Fixture generated output is declared and review-visible.",
-		changeIds: ["fixture-change:generated"],
-		technicalRefs: [{ path: generatedPath, kind: "generated_path" }],
 	},
 	{
 		kind: "unknown",
@@ -125,7 +99,6 @@ const changes = [
 				valueKind: "text",
 				renderHint: "plain",
 				afterSummary: "Fixture Alpha",
-				uiAnchor: { id: "fixture-title-field" },
 			},
 		],
 		draftContentHash: "sha256:created-fixture",
@@ -144,12 +117,6 @@ const changes = [
 				renderHint: "badge",
 				beforeSummary: "Draft",
 				afterSummary: "Ready for review",
-				uiAnchor: {
-					id: "fixture-status-field",
-					routeTarget: {
-						href: "/fixture/records/alpha?review=/details/status",
-					},
-				},
 			},
 		],
 		draftContentHash: "sha256:modified-fixture",
@@ -172,15 +139,6 @@ const changes = [
 		draftContentHash: "sha256:deleted-fixture",
 	},
 	{
-		changeId: "fixture-change:generated",
-		kind: "generated",
-		summary: "Generated fixture index changed.",
-		technicalRefs: [{ path: generatedPath, kind: "generated_path" }],
-		fields: [],
-		draftContentHash: "sha256:generated-fixture",
-		generatedFrom: [{ path: fixturePath, kind: "canonical_data_path" }],
-	},
-	{
 		changeId: "fixture-change:unknown",
 		kind: "unknown",
 		summary: "Unknown fixture-side file changed.",
@@ -190,15 +148,7 @@ const changes = [
 	},
 ] satisfies ResourceChange[];
 
-const reviewKey = {
-	baselineHead: "0123456789abcdef0123456789abcdef01234567",
-	stableResourceId,
-	resourcePaths: [fixturePath],
-	draftContentHash: "sha256:review-fixture",
-	reviewContractVersion: REVIEW_SURFACE_CONTRACT_VERSION,
-	adapterVersion: "1.0.0",
-	schemaVersion: "fixture.schema.v1",
-} satisfies ReviewedStateKey;
+const baselineHead = "0123456789abcdef0123456789abcdef01234567";
 
 const contractMetadata = {
 	reviewContractVersion: REVIEW_SURFACE_CONTRACT_VERSION,
@@ -223,10 +173,6 @@ const resource = {
 	contractMetadata,
 	reviewRepresentationHash: "sha256:resource-review-fixture",
 	changes,
-	reviewState: {
-		value: "unreviewed",
-		key: reviewKey,
-	},
 	fallback: {
 		activeLevel: "resource_adapter",
 		steps: [
@@ -279,7 +225,7 @@ const snapshotMetadata = {
 
 const snapshot = {
 	reviewContractVersion: REVIEW_SURFACE_CONTRACT_VERSION,
-	baselineHead: reviewKey.baselineHead,
+	baselineHead,
 	computedAt: contractMetadata.computedAt,
 	inputChanges,
 	resources: [resource],
@@ -307,7 +253,6 @@ const adapter = {
 					technicalRefs: change.technicalRefs,
 					fields: [],
 					draftContentHash: change.draftContentHash,
-					generatedFrom: change.generatedFrom,
 				})),
 			},
 		];
@@ -315,22 +260,14 @@ const adapter = {
 } satisfies ReviewSurfaceAdapter;
 
 describe("Review Surface contract types", () => {
-	test("cover generic change kinds, fallback levels and review states", () => {
-		expect(changeKinds).toEqual([
-			"created",
-			"modified",
-			"deleted",
-			"generated",
-			"unknown",
-		]);
+	test("cover generic change kinds and fallback levels", () => {
+		expect(changeKinds).toEqual(["created", "modified", "deleted", "unknown"]);
 		expect(fallbackLevels).toEqual([
 			"resource_adapter",
 			"generic_schema_diff",
 			"technical_file_diff",
 			"unknown",
 		]);
-		expect(reviewStates).toContain("reviewed");
-		expect(reviewStates).toContain("not_required");
 		expect(fieldValueKinds).toContain("money");
 		expect(fieldValueKinds).toContain("unknown");
 		expect(fieldRenderHints).toContain("badge");
@@ -353,15 +290,10 @@ describe("Review Surface contract types", () => {
 		expect(resource.publishReadiness?.map((ref) => ref.kind)).toEqual([
 			"schema_error",
 			"conflict",
-			"unreviewed_change",
 			"validation_error",
-			"generated_policy",
 			"unknown",
 		]);
-		expect(resource.publishReadiness?.filter((ref) => ref.blocking)).toHaveLength(4);
-		expect(resource.reviewState.key?.reviewContractVersion).toBe(
-			REVIEW_SURFACE_CONTRACT_VERSION,
-		);
+		expect(resource.publishReadiness?.filter((ref) => ref.blocking)).toHaveLength(3);
 		expect(resource.contractMetadata?.adapterId).toBe("fixture-review-adapter");
 		expect(resource.contractMetadata?.adapterVersion).toBe("1.0.0");
 		expect(resource.contractMetadata?.dataSchemaVersion).toBe("fixture-data@1.0.0");
@@ -387,7 +319,7 @@ describe("Review Surface contract types", () => {
 		expect(snapshot.inputChanges?.[1]?.previousTechnicalRefs?.[0]?.path).toBe(
 			"data/fixture-records/fixture-old-alpha.yaml",
 		);
-		expect(snapshot.metadata?.counts).toEqual({ resources: 1, changes: 5 });
+		expect(snapshot.metadata?.counts).toEqual({ resources: 1, changes: 4 });
 		expect(snapshot.reviewRepresentationHash).toBe("sha256:snapshot-review-fixture");
 	});
 });

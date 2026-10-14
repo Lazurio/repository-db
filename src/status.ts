@@ -5,6 +5,7 @@ import {
 	gitCurrentBranch,
 	gitDirtyPaths,
 	gitFetchAsync,
+	gitHeadCommit,
 } from "./git.ts";
 import { ENGINE_DIR } from "./lock.ts";
 import type { RepositoryDbConfig, SyncStatus } from "./types.ts";
@@ -43,6 +44,7 @@ function computeSyncStatus(
 		ahead,
 		behind,
 		dirtyPaths,
+		head: gitHeadCommit(mountRoot) ?? null,
 		conflict: Boolean(conflict),
 		fetched,
 	};

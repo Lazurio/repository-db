@@ -10,7 +10,7 @@ import {
 	type ReviewSurfaceAdapter,
 	type ReviewableResource,
 } from "../src/types.ts";
-import { cloneFixture, createFixtureRepo, git, writeFixtureDocument } from "./fixtures.ts";
+import { cloneFixture, createDerivedFixture, createFixtureRepo, git, writeFixtureDocument } from "./fixtures.ts";
 
 const ANNA = "Anna <anna@example.com>";
 const AGENT = "Henry <agent@example.com>";
@@ -154,25 +154,19 @@ describe("review surface engine", () => {
 		}
 	});
 
-	test("marks undeclared generated diffs as blocking", async () => {
-		const fixture = createFixtureRepo();
+	test("derived output never appears in review", async () => {
+		const fixture = createDerivedFixture();
 		try {
 			const db = RepositoryDb.open(fixture.mountPath);
-			writeFileSync(
-				path.join(fixture.mountPath, "generated/rollup.json"),
-				'{"count":1}\n',
-				"utf8",
-			);
+			writeFixtureDocument(fixture.mountPath, "thing-1", { code: "A" });
+			await db.ensureGenerated();
 
 			const snapshot = await db.review();
-
-			expect(snapshot.publishReadiness.state).toBe("blocked");
-			expect(snapshot.publishReadiness.canPublish).toBe(false);
-			expect(
-				snapshot.publishReadiness.references.some(
-					(reference) => reference.kind === "generated_policy" && reference.blocking,
-				),
-			).toBe(true);
+			const paths = snapshot.resources.flatMap((resource) =>
+				resource.changes.flatMap((change) => change.technicalRefs.map((ref) => ref.path)),
+			);
+			expect(paths).toEqual(["data/things/thing-1.yaml"]);
+			expect(snapshot.publishReadiness.canPublish).toBe(true);
 		} finally {
 			rmSync(fixture.root, { recursive: true, force: true });
 		}

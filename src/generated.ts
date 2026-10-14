@@ -1,137 +1,260 @@
-import { execSync } from "node:child_process";
-import { gitDirtyPaths } from "./git.ts";
-
-/**
- * Hard ceiling for config-supplied materializer/validate commands. A hung
- * command would otherwise wedge publish forever while the publish lock is
- * held (stale-lock reclaim only kicks in after 15 minutes on the same host).
- */
-const COMMAND_TIMEOUT_MS = 10 * 60 * 1000;
+import { exec } from "node:child_process";
+import { existsSync, readFileSync, rmSync } from "node:fs";
+import path from "node:path";
+import { assertDataRepoBoundary } from "./boundary.ts";
+import { computeContentState } from "./draftRevision.ts";
+import { runGit } from "./git.ts";
 import { ENGINE_DIR } from "./lock.ts";
+import { toStableJson, writeFileAtomic } from "./yamlIo.ts";
 import {
+	MaterializeFailedError,
 	type RepositoryDbConfig,
-	RepositoryDbError,
+	TrackedDerivedOutputError,
 	ValidationFailedError,
 } from "./types.ts";
 
 /**
- * Generated read-model policy.
+ * Derived output: an ignored cache the engine builds in the live checkout.
  *
- * Committed generated artifacts must be declared in the generated manifest in
- * repository-db.yaml. Anything else under the generated layout directory is
- * an undeclared diff and publish refuses it. Per-machine caches belong to the
- * ignored `.repository-db/cache/` layer, never to Git.
+ * Every `generated_manifest` path is derived from the tracked data and nothing
+ * else, so it is never in Git: the data repo ignores it, the engine rebuilds it
+ * whenever the tracked content changed, and it therefore never takes part in a
+ * draft, an overlap check, a merge, a conflict, review or discard. Two people
+ * publishing different records cannot collide on it, and a stale copy cannot
+ * be merged line by line.
  *
- * Determinism contract for declared artifacts: stable sort by canonical id,
- * stable YAML/JSON writer, LF newlines, UTF-8, no wall-clock timestamps, no
- * host paths, no per-machine values. Two materializations from the same
- * `data/` input must be byte-identical (`repository-db validate` can verify
- * this via the materializer commands).
+ * Materializers and validators are commands of the data repository. They run
+ * with cwd = mount root, where the data repo's own dependencies live, read only
+ * the data checkout and write only to declared paths. Determinism still
+ * matters (stable sort, stable writer, LF, no wall clock, no host paths): the
+ * same data must give the same output on every Environment.
  */
-
-export function isPathDeclared(
-	relativePath: string,
-	config: RepositoryDbConfig,
-): boolean {
-	return config.generatedManifest.some(
-		(entry) =>
-			relativePath === entry.path || relativePath.startsWith(`${entry.path}/`),
-	);
-}
 
 /**
- * A generated-layout path the manifest does not declare. The one exception is
- * the empty placeholder `init` commits so the directory exists; it is not
- * output and never needs declaring.
+ * Hard ceiling for config-supplied commands. A hung command would otherwise
+ * hold the shared gate for good.
  */
-export function isUndeclaredGenerated(relativePath: string, config: RepositoryDbConfig): boolean {
-	const generatedPrefix = `${config.layout.generated}/`;
-	return (
-		relativePath.startsWith(generatedPrefix) &&
-		relativePath !== `${generatedPrefix}.gitkeep` &&
-		!isPathDeclared(relativePath, config)
-	);
+const COMMAND_TIMEOUT_MS = 10 * 60 * 1000;
+const STAMP_FILE = "generated.stamp.json";
+const STAMP_SCHEMA = "repository-db.generated-stamp.v1";
+
+function stampPath(mountRoot: string): string {
+	return path.join(mountRoot, ENGINE_DIR, STAMP_FILE);
 }
 
-/**
- * Return dirty generated paths that are not declared in the manifest.
- * Publish refuses to continue while any exist.
- */
-export function undeclaredGeneratedDiffs(
-	mountRoot: string,
-	config: RepositoryDbConfig,
-): string[] {
-	return gitDirtyPaths(mountRoot)
-		.filter((entry) => !entry.startsWith(`${ENGINE_DIR}/`))
-		.filter((entry) => isUndeclaredGenerated(entry, config));
-}
+type CommandOutcome = { ok: true } | { ok: false; detail: string };
 
-export function assertDeclaredGeneratedOnly(
-	mountRoot: string,
-	config: RepositoryDbConfig,
-): void {
-	const undeclared = undeclaredGeneratedDiffs(mountRoot, config);
-	if (undeclared.length > 0) {
-		throw new ValidationFailedError(
-			`publish refused: undeclared generated diffs (${undeclared.join(", ")}). ` +
-				"Declare the artifact in the generated_manifest of repository-db.yaml or keep it in the ignored .repository-db/cache/ layer.",
-		);
-	}
-}
-
-/** Run every declared materializer command with cwd = mount root. */
-export function materializeGenerated(
-	mountRoot: string,
-	config: RepositoryDbConfig,
-): string[] {
-	const ran: string[] = [];
-	for (const entry of config.generatedManifest) {
-		if (!entry.materializer) continue;
-		try {
-			execSync(entry.materializer, {
+/** Run one data-repo command with cwd = mount root, off the event loop. */
+function runCommand(command: string, mountRoot: string): Promise<CommandOutcome> {
+	return new Promise((resolve) => {
+		exec(
+			command,
+			{
 				cwd: mountRoot,
-				stdio: ["ignore", "pipe", "pipe"],
-				encoding: "utf8",
 				env: { ...process.env },
 				timeout: COMMAND_TIMEOUT_MS,
 				killSignal: "SIGKILL",
-			});
-		} catch (error) {
-			const detail =
-				error instanceof Error ? error.message : String(error);
-			throw new RepositoryDbError(
-				"materialize_failed",
-				`materializer for ${entry.path} failed: ${detail}`,
+				maxBuffer: 64 * 1024 * 1024,
+			},
+			(error, _stdout, stderr) => {
+				if (!error) {
+					resolve({ ok: true });
+					return;
+				}
+				const detail = [error.message, String(stderr ?? "")]
+					.map((part) => part.trim())
+					.filter(Boolean)
+					.filter((part, index, all) => all.indexOf(part) === index)
+					.join("\n");
+				resolve({ ok: false, detail });
+			},
+		);
+	});
+}
+
+/**
+ * Refuse a checkout that still tracks what the engine owns as a local cache:
+ * a declared derived path (tracked or not ignored), or the engine's runtime
+ * directory, which an older engine could leave tracked.
+ *
+ * The migration is one ordinary commit in the data repo, made with plain Git
+ * (the engine refuses to publish until it is done).
+ */
+export function assertDerivedOutputIgnored(mountRoot: string, config: RepositoryDbConfig): void {
+	const engineTracked = runGit(mountRoot, ["ls-files", "-z", "--", ENGINE_DIR])
+		.stdout.split("\0")
+		.filter(Boolean);
+	if (engineTracked.length > 0) {
+		throw new TrackedDerivedOutputError(
+			"engine_state_tracked",
+			`The data checkout tracks repository-db runtime files (${engineTracked.join(", ")}), left by an older repository-db. Clean the checkout before using this version: git rm -r --cached -- ${ENGINE_DIR}, add "/${ENGINE_DIR}/" to .gitignore, then commit and push that as an ordinary data commit.`,
+			engineTracked,
+			[
+				`git rm -r --cached --quiet -- ${ENGINE_DIR}`,
+				`printf '%s\\n' '/${ENGINE_DIR}/' >> .gitignore`,
+				`git add .gitignore && git commit -m "Stop tracking repository-db runtime files" && git push`,
+			],
+		);
+	}
+
+	const declared = config.generatedManifest.map((entry) => entry.path);
+	if (declared.length === 0) return;
+	const tracked = new Set(
+		runGit(mountRoot, ["ls-files", "-z", "--", ...declared]).stdout.split("\0").filter(Boolean),
+	);
+	const trackedEntries = declared.filter((entry) =>
+		[...tracked].some((file) => file === entry || file.startsWith(`${entry}/`)),
+	);
+	// A directory pattern ("/generated/") matches a path that does not exist yet
+	// only through a child, so a probe inside counts as well.
+	const probes = declared.flatMap((entry) => [entry, `${entry}/.repository-db-probe`]);
+	const ignored = new Set(
+		runGit(mountRoot, ["check-ignore", "--no-index", "--stdin", "-z"], {
+			input: `${probes.join("\0")}\0`,
+		})
+			.stdout.split("\0")
+			.filter(Boolean),
+	);
+	const notIgnored = declared.filter(
+		(entry) => !ignored.has(entry) && !ignored.has(`${entry}/.repository-db-probe`),
+	);
+	const problems = [...new Set([...trackedEntries, ...notIgnored])];
+	if (problems.length === 0) return;
+	throw new TrackedDerivedOutputError(
+		"derived_output_tracked",
+		`Derived output must not be in Git, and this data repository still ${
+			trackedEntries.length > 0 ? "tracks" : "does not ignore"
+		} ${problems.join(", ")}. Derived output is a cache repository-db rebuilds on every Environment. Migrate the data repository once, as an ordinary data commit: git rm -r --cached --ignore-unmatch -- ${problems.join(
+			" ",
+		)}; add ${problems.map((entry) => `"/${entry}"`).join(", ")} to .gitignore; commit and push. Nothing was changed.`,
+		problems,
+		[
+			`git rm -r --cached --quiet --ignore-unmatch -- ${problems.join(" ")}`,
+			...problems.map((entry) => `printf '%s\\n' '/${entry}' >> .gitignore`),
+			`git add .gitignore && git commit -m "Derived output is an ignored cache built by repository-db" && git push`,
+		],
+	);
+}
+
+interface GeneratedStamp {
+	schema: string;
+	/** {@link computeContentState} the output was built from. */
+	state: string;
+}
+
+function readStamp(mountRoot: string): GeneratedStamp | undefined {
+	try {
+		const parsed = JSON.parse(readFileSync(stampPath(mountRoot), "utf8")) as GeneratedStamp;
+		return parsed.schema === STAMP_SCHEMA && typeof parsed.state === "string" ? parsed : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function materializedEntries(config: RepositoryDbConfig) {
+	return config.generatedManifest.filter(
+		(entry): entry is typeof entry & { materializer: string } => Boolean(entry.materializer),
+	);
+}
+
+/** Is the derived output built from exactly the content checked out now? */
+export function isGeneratedFresh(mountRoot: string, config: RepositoryDbConfig): boolean {
+	const entries = materializedEntries(config);
+	if (entries.length === 0) return true;
+	const stamp = readStamp(mountRoot);
+	if (!stamp || stamp.state !== computeContentState(mountRoot)) return false;
+	return entries.every((entry) => existsSync(path.join(mountRoot, entry.path)));
+}
+
+export interface EnsureGeneratedResult {
+	/** True when the materializers ran in this call. */
+	rebuilt: boolean;
+	/** Materializer commands that ran. */
+	ran: string[];
+}
+
+/** One build per checkout at a time within this process. */
+const builds = new Map<string, Promise<EnsureGeneratedResult>>();
+
+async function build(
+	mountRoot: string,
+	config: RepositoryDbConfig,
+): Promise<EnsureGeneratedResult> {
+	const state = computeContentState(mountRoot);
+	// Dropped first: a build that fails halfway must not leave a stamp vouching
+	// for output it did not finish.
+	rmSync(stampPath(mountRoot), { force: true });
+	const ran: string[] = [];
+	for (const entry of materializedEntries(config)) {
+		const outcome = await runCommand(entry.materializer, mountRoot);
+		if (!outcome.ok) {
+			throw new MaterializeFailedError(
+				entry.path,
+				`The derived output ${entry.path} could not be built: \`${entry.materializer}\` failed. Nothing was staged or published; fix the materializer or the data and try again.\n${outcome.detail}`,
 			);
 		}
 		ran.push(entry.materializer);
 	}
-	return ran;
+	const stamp: GeneratedStamp = { schema: STAMP_SCHEMA, state };
+	writeFileAtomic(stampPath(mountRoot), toStableJson(stamp));
+	return { rebuilt: true, ran };
+}
+
+/**
+ * Make the derived output match the data checked out right now, building it
+ * only when it is stale. Readers call this before they read a derived path;
+ * publish calls it before validating and after integrating a colleague's work.
+ *
+ * Staleness needs no bookkeeping by callers: the stamp records the content it
+ * was built from, so a pull, a send, a discard or a record write makes it
+ * stale by changing that content. A failing materializer throws
+ * {@link MaterializeFailedError}; it never stages anything and never creates a
+ * draft (derived paths are ignored).
+ */
+export async function ensureGenerated(
+	mountRoot: string,
+	config: RepositoryDbConfig,
+	options: { force?: boolean } = {},
+): Promise<EnsureGeneratedResult> {
+	assertDataRepoBoundary(mountRoot, config);
+	assertDerivedOutputIgnored(mountRoot, config);
+	if (materializedEntries(config).length === 0) return { rebuilt: false, ran: [] };
+	const key = path.resolve(mountRoot);
+	for (let running = builds.get(key); running; running = builds.get(key)) {
+		await running.catch(() => undefined);
+	}
+	// No await between the check and claiming the slot: one build starts.
+	if (!options.force && isGeneratedFresh(mountRoot, config)) return { rebuilt: false, ran: [] };
+	const running = build(mountRoot, config);
+	builds.set(key, running);
+	try {
+		return await running;
+	} finally {
+		if (builds.get(key) === running) builds.delete(key);
+	}
 }
 
 /** Run the configured validate commands with cwd = mount root. */
-export function runValidateCommands(
+export async function runValidateCommands(
 	mountRoot: string,
 	config: RepositoryDbConfig,
-): string[] {
+): Promise<string[]> {
 	const ran: string[] = [];
 	for (const command of config.validate) {
-		try {
-			execSync(command, {
-				cwd: mountRoot,
-				stdio: ["ignore", "pipe", "pipe"],
-				encoding: "utf8",
-				env: { ...process.env },
-				timeout: COMMAND_TIMEOUT_MS,
-				killSignal: "SIGKILL",
-			});
-		} catch (error) {
-			const detail = error instanceof Error ? error.message : String(error);
-			throw new ValidationFailedError(
-				`validate command failed: ${command}\n${detail}`,
-			);
+		const outcome = await runCommand(command, mountRoot);
+		if (!outcome.ok) {
+			throw new ValidationFailedError(`validate command failed: ${command}\n${outcome.detail}`);
 		}
 		ran.push(command);
 	}
 	return ran;
+}
+
+/** Derived output first, then the validators that may read it. */
+export async function validateCheckout(
+	mountRoot: string,
+	config: RepositoryDbConfig,
+): Promise<string[]> {
+	await ensureGenerated(mountRoot, config);
+	return runValidateCommands(mountRoot, config);
 }

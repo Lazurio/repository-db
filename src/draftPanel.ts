@@ -1,15 +1,20 @@
 import type {
+	ConflictState,
 	PublishReadinessSummary,
 	ReviewChangeOriginKind,
 	ReviewableResource,
-} from "../types.ts";
+	SyncStatus,
+} from "./types.ts";
 
 /**
- * View model of the Draft & Publish panel.
+ * View model of the Draft & Publish card — the one place that decides what a
+ * repository-db app says about its data checkout.
  *
- * Pure data: no React, no fetch, no Git. The host app hands in what its
- * `/draft/review` endpoint returned and gets back exactly what the card should
- * say — which is also what makes the wording testable without a browser.
+ * Pure data: no React, no fetch, no Git. The host hands in the engine's status
+ * (and, when the card is open, the review records) and gets back exactly what
+ * the card should say — which is also what makes the wording testable without
+ * a browser. State priority comes from the engine (`SyncStatus.state`); this
+ * module only words it. `@lazurio/repository-db/ui` renders it.
  *
  * The rules it encodes are the ones from the standard:
  * one shared draft that publishes as a whole; an unsent commit is finishing a
@@ -17,7 +22,13 @@ import type {
  * next step; provenance is information only.
  */
 
-export type DraftPanelTone = "published" | "draft" | "sending" | "remote" | "conflict";
+export type DraftPanelTone =
+	| "published"
+	| "draft"
+	| "sending"
+	| "remote"
+	| "conflict"
+	| "unavailable";
 
 export interface DraftPanelRecordInput {
 	resource: ReviewableResource;
@@ -37,18 +48,20 @@ export interface DraftPanelConflict {
 }
 
 export interface DraftPanelInput {
-	revision: string;
-	/** Commit waiting to be sent; finishing a send must name exactly this one. */
-	pendingHead?: string;
-	state: "conflict" | "draft" | "committed_not_pushed" | "pull_needed" | "published";
-	branch?: string;
-	ahead?: number;
-	behind?: number;
+	/** Engine status of the data checkout; `null` when it is not available. */
+	status: SyncStatus | null;
+	/** Why the checkout is not available, in the user's language. */
+	unavailableReason?: string;
+	/** Revision of the draft the records describe (from the review). */
+	revision?: string;
+	/** The active conflict, as the engine reports it. */
+	conflict?: ConflictState | null;
 	draftOwner?: { actor: string } | null;
-	/** Present when the checkout is in a conflict the user has to resolve. */
-	conflict?: DraftPanelConflict | null;
 	publishReadiness?: PublishReadinessSummary;
-	records: DraftPanelRecordInput[];
+	/** Review records; without them the card counts the draft's paths. */
+	records?: DraftPanelRecordInput[];
+	/** A pull the engine refused under this draft (`PullBlockedError`). */
+	pullBlocked?: { paths: string[]; message: string } | null;
 }
 
 export interface DraftPanelFieldRow {
@@ -82,7 +95,6 @@ export interface DraftPanelAction {
 		| "publish"
 		| "discard_draft"
 		| "finish_send"
-		| "retry_conflict_send"
 		| "pull"
 		| "abort_conflict"
 		| "mark_conflict_resolved";
@@ -126,7 +138,6 @@ const CHANGE_LABELS: Record<string, string> = {
 	created: "Nový",
 	modified: "Upraveno",
 	deleted: "Smazáno",
-	generated: "Generováno",
 	unknown: "Změna",
 };
 
@@ -171,7 +182,6 @@ function recordOf(input: DraftPanelRecordInput): DraftPanelRecord {
 /** Which optional recovery actions the host actually implements. */
 export interface DraftPanelCapabilities {
 	finishSend?: boolean;
-	retryConflictSend?: boolean;
 	pull?: boolean;
 	abortConflict?: boolean;
 	markConflictResolved?: boolean;
@@ -190,7 +200,6 @@ function applyCapabilities(
 	if (!capabilities) return actions;
 	const supported: Record<string, boolean | undefined> = {
 		finish_send: capabilities.finishSend,
-		retry_conflict_send: capabilities.retryConflictSend,
 		pull: capabilities.pull,
 		abort_conflict: capabilities.abortConflict,
 		mark_conflict_resolved: capabilities.markConflictResolved,
@@ -202,16 +211,46 @@ function applyCapabilities(
 	);
 }
 
+function panelConflict(conflict: ConflictState | null | undefined): DraftPanelConflict | null {
+	if (!conflict) return null;
+	return {
+		message: conflict.message,
+		handoff: conflict.handoff,
+		...(conflict.paths ? { paths: conflict.paths } : {}),
+		retryable: conflict.retryable === true,
+	};
+}
+
 export function deriveDraftPanel(
 	input: DraftPanelInput,
 	capabilities?: DraftPanelCapabilities,
 ): DraftPanelModel {
+	const status = input.status;
+	if (!status) {
+		return {
+			visible: false,
+			tone: "unavailable",
+			pill: "Data nejsou dostupná",
+			count: 0,
+			waitingRecordCount: 0,
+			headline: input.unavailableReason ?? "Datový checkout zatím není k dispozici.",
+			records: [],
+			actions: [],
+			revision: input.revision ?? "",
+		};
+	}
+	const state = status.state;
+	const ahead = status.ahead;
+	// The commit a finish (or a retry) must name: the one the conflict was
+	// recorded for, otherwise the local commit waiting to be sent.
+	const pendingHead =
+		input.conflict?.pendingHead ?? (ahead > 0 && status.head ? status.head : undefined);
+	const conflict = panelConflict(input.conflict);
 	// A record revert is a discard; where the engine refuses discards as a whole
 	// (conflict, a commit waiting to be sent), no row may offer one — whatever
 	// the host reported per record.
-	const discardBlocked =
-		input.state === "conflict" || input.state === "committed_not_pushed" || (input.ahead ?? 0) > 0;
-	const records = input.records
+	const discardBlocked = state === "conflict" || state === "committed_not_pushed" || ahead > 0;
+	const records = (input.records ?? [])
 		.map(recordOf)
 		.map((record) =>
 			discardBlocked && record.revertSupported
@@ -219,33 +258,33 @@ export function deriveDraftPanel(
 						...record,
 						revertSupported: false,
 						revertBlockedReason:
-							input.state === "conflict"
+							state === "conflict"
 								? "Během konfliktu nejde nic vracet."
 								: "Nejdřív dokončete odeslání uložené publikace.",
 					}
 				: record,
 		);
-	const count = records.length;
-	const conflictPathCount = input.conflict?.paths
-		? new Set(input.conflict.paths.filter((entry) => typeof entry === "string" && entry.length > 0)).size
+	const count = input.records ? records.length : status.dirtyPaths.length;
+	const conflictPathCount = conflict?.paths
+		? new Set(conflict.paths.filter((entry) => typeof entry === "string" && entry.length > 0)).size
 		: count;
 	const base = {
 		records,
-		revision: input.revision,
-		pendingHead: input.pendingHead,
+		revision: input.revision ?? "",
+		pendingHead,
 		waitingRecordCount: count,
 		ownerNote: input.draftOwner?.actor
 			? `Rozpracované změny začal: ${input.draftOwner.actor}`
 			: undefined,
 	};
 
-	if (input.state === "conflict") {
-		const canRetry = input.conflict?.retryable === true && Boolean(input.pendingHead);
+	if (state === "conflict") {
+		const canRetry = conflict?.retryable === true && Boolean(pendingHead);
 		const actions: DraftPanelAction[] = [
 			...(canRetry
 				? [
 						{
-							kind: "retry_conflict_send" as const,
+							kind: "finish_send" as const,
 							label: "Zkusit bezpečně sloučit a odeslat",
 							enabled: true,
 						},
@@ -271,9 +310,9 @@ export function deriveDraftPanel(
 			tone: "conflict",
 			pill: "Konflikt",
 			count: conflictPathCount,
-			conflict: input.conflict ?? null,
+			conflict,
 			headline:
-				input.conflict?.message ??
+				conflict?.message ??
 				"Data se rozešla se serverem. Změny zůstávají vidět, ale publikovat ani vracet teď nejde.",
 			...(count > conflictPathCount
 				? {
@@ -290,7 +329,7 @@ export function deriveDraftPanel(
 	// An unsent commit is not a draft: the work is already committed, it just did
 	// not reach the server. Offering "discard" here would claim to return to the
 	// last published version, which is not what it would do.
-	if (input.state === "committed_not_pushed") {
+	if (state === "committed_not_pushed") {
 		return {
 			...base,
 			visible: true,
@@ -306,8 +345,8 @@ export function deriveDraftPanel(
 					kind: "finish_send",
 					label: "Dokončit odeslání",
 					// Without the pending commit there is nothing to hold the send to.
-					enabled: Boolean(input.pendingHead),
-					disabledReason: input.pendingHead
+					enabled: Boolean(pendingHead),
+					disabledReason: pendingHead
 						? undefined
 						: "Chybí informace o čekající publikaci. Obnovte přehled.",
 				},
@@ -323,7 +362,7 @@ export function deriveDraftPanel(
 	}
 
 	if (count > 0) {
-		const unsentCommit = input.ahead ?? 0;
+		const unsentCommit = ahead;
 		const readiness = input.publishReadiness;
 		const blocking = readiness?.references.filter((reference) => reference.blocking) ?? [];
 		return {
@@ -358,11 +397,23 @@ export function deriveDraftPanel(
 							: undefined,
 					destructive: true,
 				},
+				// Colleagues' newer work comes in under the draft unless they
+				// changed the same records; then the card says which and how out.
+				...(status.behind > 0
+					? [
+							{
+								kind: "pull" as const,
+								label: "Stáhnout novější data",
+								enabled: !input.pullBlocked,
+								...(input.pullBlocked ? { disabledReason: input.pullBlocked.message } : {}),
+							},
+						]
+					: []),
 			], capabilities),
 		};
 	}
 
-	if (input.state === "pull_needed") {
+	if (state === "pull_needed") {
 		return {
 			...base,
 			visible: true,

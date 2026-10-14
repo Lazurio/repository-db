@@ -3,9 +3,9 @@ import os from "node:os";
 import path from "node:path";
 import { assertDataRepoBoundary } from "./boundary.ts";
 import {
+	activeConflict,
 	assertNoActiveConflict,
 	clearRecordedConflictState,
-	readConflictState,
 	writeConflictState,
 } from "./conflict.ts";
 import { assertCredentials } from "./credentials.ts";
@@ -24,43 +24,51 @@ import {
 	runGitAsync,
 	runGitOrThrow,
 } from "./git.ts";
-import {
-	assertDeclaredGeneratedOnly,
-	isPathDeclared,
-	isUndeclaredGenerated,
-	materializeGenerated,
-	runValidateCommands,
-} from "./generated.ts";
+import { assertDerivedOutputIgnored, ensureGenerated, runValidateCommands } from "./generated.ts";
 import { ENGINE_DIR, acquirePublishLock } from "./lock.ts";
 import { clearDraftProvenance } from "./origin.ts";
 import { mergeCanonicalYamlThreeWay } from "./semanticYamlMerge.ts";
 import { buildCommitMessage, newChangeId } from "./trailers.ts";
 import { writeFileAtomic } from "./yamlIo.ts";
 import {
+	ConflictActiveError,
+	type ConflictKind,
 	type FinishSendOptions,
+	MaterializeFailedError,
+	PullBlockedError,
 	type PublishOptions,
 	type PublishResult,
 	type RepositoryDbConfig,
-	type RetryConflictSendOptions,
 	RepositoryDbError,
+	ValidationFailedError,
 } from "./types.ts";
 
 /**
  * The publish lifecycle, owned here and nowhere else:
  *
- *   publish(revision)   gate -> confirm revision -> validate -> materialize ->
- *                       commit the draft -> send
- *   finishSend(head)    gate -> confirm head, no new draft -> send
- *   send (private)      fetch -> integrate a moved remote in a separate lane
- *                       worktree -> move the checkout to the result -> push
+ *   publish(revision)   gate -> confirm revision -> identity -> build derived
+ *                       output and validate in the live checkout -> commit
+ *                       the tracked draft -> send
+ *   finishSend(head)    gate -> confirm head, no new draft -> send; also the
+ *                       retry of a send the engine stopped with a conflict
+ *   send (private)      fetch -> if behind, replay the local commits onto the
+ *                       remote in a separate lane worktree (Git only: text
+ *                       rebase plus the semantic YAML merge) -> move the live
+ *                       checkout to the result -> build and validate there ->
+ *                       push; a push the remote moved under is integrated
+ *                       again, a bounded number of times
  *   pullRemote          fast-forward only; never merges into local work
  *
- * The live checkout is never left mid-rebase. Remote changes are integrated in
- * a temporary worktree; the checkout moves only when that succeeded, and with
- * `reset --keep`, which refuses rather than overwrites anything unexpected.
- * Every step runs inside the shared gate, so no supported write can land
- * between the confirmation and the push.
+ * The live checkout is never left mid-rebase. It moves only with
+ * `reset --keep`, which refuses rather than overwrites anything unexpected,
+ * and an integrated result that fails validation is moved back to the local
+ * commit before anything is pushed. Derived output is an ignored cache, so it
+ * never takes part in any of this. Every step runs inside the shared gate, so
+ * no supported write can land between the confirmation and the push.
  */
+
+/** Pushes rejected because the remote moved again are integrated anew this often. */
+const MAX_SEND_ATTEMPTS = 3;
 
 function engineDirFree(paths: string[]): string[] {
 	return paths.filter((entry) => !entry.startsWith(`${ENGINE_DIR}/`));
@@ -72,15 +80,10 @@ function defaultSubject(
 	entities: string[] | undefined,
 ): string {
 	const dataPrefix = `${config.layout.data}/`;
-	const generatedPrefix = `${config.layout.generated}/`;
 	const dataChanges = dirtyPaths.filter((p) => p.startsWith(dataPrefix)).length;
-	const generatedChanges = dirtyPaths.filter((p) =>
-		p.startsWith(generatedPrefix),
-	).length;
-	const otherChanges = dirtyPaths.length - dataChanges - generatedChanges;
+	const otherChanges = dirtyPaths.length - dataChanges;
 	const parts: string[] = [];
 	if (dataChanges > 0) parts.push(`${dataChanges} data file(s)`);
-	if (generatedChanges > 0) parts.push(`${generatedChanges} generated file(s)`);
 	if (otherChanges > 0) parts.push(`${otherChanges} other file(s)`);
 	const entitySuffix =
 		entities && entities.length > 0
@@ -103,7 +106,7 @@ function gated<T>(mountRoot: string, run: () => Promise<T>): Promise<T> {
 /**
  * Commits made here need an author and a committer; a send that replays a
  * waiting commit onto a colleague's work needs a committer too. Ask Git the
- * same question `git commit` asks, before anything is materialized, staged or
+ * same question `git commit` asks, before anything is built, staged or
  * replayed, so a missing identity refuses cleanly instead of failing halfway.
  * The engine never invents an identity; the Environment provides one.
  */
@@ -119,6 +122,12 @@ function assertCommitIdentity(mountRoot: string): void {
 			}`,
 		);
 	}
+}
+
+/** Derived output first, then the validators that may read it; both in the live checkout. */
+async function verifyLiveCheckout(mountRoot: string, config: RepositoryDbConfig): Promise<void> {
+	await ensureGenerated(mountRoot, config);
+	await runValidateCommands(mountRoot, config);
 }
 
 type LaneConflictDetail = {
@@ -216,38 +225,12 @@ function resolveSemanticLaneConflicts(
 }
 
 /**
- * A semantic union may change declared read models even when Git did not see a
- * text conflict in their files. Rebuild only in the disposable lane, reject
- * every non-declared side effect, validate there, then amend the replayed tip.
- */
-function materializeSemanticLane(laneRoot: string, config: RepositoryDbConfig): void {
-	if (engineDirFree(gitDirtyPaths(laneRoot)).length > 0) {
-		throw new RepositoryDbError(
-			"semantic_lane_dirty",
-			"semantic integration lane is unexpectedly dirty before generated output is rebuilt",
-		);
-	}
-	materializeGenerated(laneRoot, config);
-	const changed = engineDirFree(gitDirtyPaths(laneRoot));
-	const undeclared = changed.filter((entry) => !isPathDeclared(entry, config));
-	if (undeclared.length > 0) {
-		throw new RepositoryDbError(
-			"generated_policy",
-			`semantic integration materializer changed paths outside generated_manifest (${undeclared.join(", ")})`,
-		);
-	}
-	assertDeclaredGeneratedOnly(laneRoot, config);
-	runValidateCommands(laneRoot, config);
-	if (changed.length === 0) return;
-	runGitOrThrow(laneRoot, ["add", "--", ...changed]);
-	runGitOrThrow(laneRoot, ["commit", "--amend", "--no-edit"]);
-}
-
-/**
  * Replay the local commits onto the fetched remote in a throwaway worktree.
- * Whatever happens there, the live checkout is untouched. Git first tries its
- * normal merge; only text-conflicted canonical YAML gets a conservative
- * structural merge before the rebase is continued.
+ * Whatever happens there, the live checkout is untouched. The lane does Git
+ * work only: Git's normal merge, and for text-conflicted canonical YAML a
+ * conservative structural merge before the rebase continues. Building and
+ * validating the result happens in the live checkout, where the data repo's
+ * dependencies are.
  */
 async function rebaseInLane(
 	mountRoot: string,
@@ -257,14 +240,12 @@ async function rebaseInLane(
 ): Promise<LaneResult> {
 	const parent = mkdtempSync(path.join(os.tmpdir(), "repository-db-lane-"));
 	const laneRoot = path.join(parent, "lane");
-	let usedSemanticMerge = false;
 	try {
 		runGitOrThrow(mountRoot, ["worktree", "add", "--detach", laneRoot, start]);
 		let rebase = await runGitAsync(laneRoot, ["rebase", onto]);
 		for (let attempts = 0; attempts < 64; attempts += 1) {
 			const unmerged = gitUnmergedPaths(laneRoot);
 			if (rebase.status === 0 && unmerged.length === 0) {
-				if (usedSemanticMerge) materializeSemanticLane(laneRoot, config);
 				return { ok: true, head: gitHeadCommit(laneRoot) ?? start };
 			}
 			if (unmerged.length === 0) {
@@ -284,7 +265,6 @@ async function rebaseInLane(
 					conflicts: semantic.conflicts,
 				};
 			}
-			usedSemanticMerge = true;
 			rebase = runGit(laneRoot, ["-c", "core.editor=true", "rebase", "--continue"]);
 		}
 		return {
@@ -300,51 +280,53 @@ async function rebaseInLane(
 	}
 }
 
-function laneConflictHandoff(mountRoot: string, branch: string): string {
+function conflictHandoff(mountRoot: string, branch: string, kind: ConflictKind): string {
 	return [
-		"repository-db bezpečně neprokázal sloučení všech změn. Pracovní kopie zůstala beze změny.",
-		"a) Pokud panel nabízí bezpečný opakovaný pokus, použijte ho jen pro zobrazený čekající commit.",
-		"b) Jinak repository-db conflict --abort vrátí čekající publikaci zpět do draftu;",
-		"   potom upravte konfliktní záznam nad aktuálními kolegovými daty a publikujte znovu.",
+		kind === "merge"
+			? "repository-db bezpečně neprokázal sloučení všech změn. Pracovní kopie zůstala beze změny."
+			: "Vaše změny spojené s novější prací kolegy neprošly ověřením dat. Pracovní kopie zůstala na vašem čekajícím commitu.",
+		"a) Až kolega problém opraví, dokončete odeslání znovu (finish-send se zobrazeným commitem).",
+		"b) Jinak repository-db conflict --abort vrátí čekající publikaci zpět do konceptu;",
+		"   vraťte dotčený záznam, stáhněte práci kolegy, změnu proveďte znovu a publikujte.",
 		`Větev ${branch} se nesmí ručně rebasovat v aktivním data mountu.`,
 		`Technický detail zůstává v ${mountRoot}/.repository-db/conflict.json.`,
 		"Do té doby repository-db odmítá zápisy i publikaci.",
 	].join("\n");
 }
 
-/**
- * The generated-output policy for commits that wait to be sent. Publish checks
- * it before committing; a waiting commit made any other way is held to the same
- * rule before it leaves, the same way review reports it.
- */
-function assertUnsentGeneratedDeclared(mountRoot: string, config: RepositoryDbConfig): void {
-	const remoteRef = `refs/remotes/origin/${config.dataRepo.branch}`;
-	const hasRemote = runGit(mountRoot, ["rev-parse", "--verify", "--quiet", remoteRef]).status === 0;
-	const unsent = hasRemote
-		? gitChangedPaths(mountRoot, [`${remoteRef}...HEAD`])
-		: runGitOrThrow(mountRoot, ["ls-tree", "-r", "--name-only", "-z", "HEAD"])
-				.split("\0")
-				.filter(Boolean);
-	const undeclared = unsent.filter((entry) => isUndeclaredGenerated(entry, config));
-	if (undeclared.length > 0) {
-		throw new RepositoryDbError(
-			"generated_policy",
-			`The commit waiting to be sent contains generated files not declared in generated_manifest (${undeclared.join(", ")}); it was not sent.`,
-		);
-	}
-}
-
-/**
- * Send the local commits: integrate a moved remote, then push. Caller holds
- * the gate. Returns `pushed: false` when the remote already has everything.
- */
-async function send(
+function recordSendConflict(
 	mountRoot: string,
 	config: RepositoryDbConfig,
 	operation: "publish" | "finish-send",
-): Promise<{ pushed: boolean; remoteChanges: string[] }> {
-	const branch = config.dataRepo.branch;
-	const remoteRef = `refs/remotes/origin/${branch}`;
+	pendingHead: string,
+	detail: {
+		kind: ConflictKind;
+		gitState: string;
+		message: string;
+		paths: string[];
+		unresolvedFields?: Record<string, string[]>;
+	},
+): never {
+	const state = writeConflictState(mountRoot, {
+		kind: detail.kind,
+		detectedAt: new Date().toISOString(),
+		operation,
+		gitState: detail.gitState,
+		message: detail.message,
+		paths: detail.paths,
+		...(detail.unresolvedFields && Object.keys(detail.unresolvedFields).length > 0
+			? { unresolvedFields: detail.unresolvedFields }
+			: {}),
+		pendingHead,
+		// The live checkout holds exactly the pending commit and no Git operation
+		// runs in it, so a later explicit retry may fetch and integrate again.
+		retryable: true,
+		handoff: conflictHandoff(mountRoot, config.dataRepo.branch, detail.kind),
+	});
+	throw new RepositoryDbError("publish_conflict", `${state.message}\n\n${state.handoff}`);
+}
+
+async function fetchForSend(mountRoot: string): Promise<void> {
 	try {
 		await gitFetchAsync(mountRoot);
 	} catch (error) {
@@ -353,59 +335,105 @@ async function send(
 			`Could not reach the remote; the commit stays waiting to be sent (committed_not_pushed). Detail: ${(error as Error).message}`,
 		);
 	}
+}
 
-	const head = gitHeadCommit(mountRoot);
-	const remoteHead = runGit(mountRoot, ["rev-parse", "--verify", "--quiet", remoteRef]).stdout.trim();
-	let remoteChanges: string[] = [];
-	if (head && remoteHead) {
-		if (runGit(mountRoot, ["merge-base", "--is-ancestor", head, remoteHead]).status === 0) {
-			// The remote already has these commits — an earlier push arrived even
-			// though it reported failure — and maybe colleagues' work on top.
-			// Nothing to send; catch the checkout up to what is published.
-			if (head !== remoteHead) {
-				remoteChanges = gitChangedPaths(mountRoot, [head, remoteHead]);
-				runGitOrThrow(mountRoot, ["reset", "--keep", remoteHead]);
+function remoteHeadOf(mountRoot: string, branch: string): string {
+	return runGit(mountRoot, ["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${branch}`]).stdout.trim();
+}
+
+/**
+ * Send the local commits: integrate a moved remote, verify the integrated
+ * result in the live checkout, push. Caller holds the gate. Returns
+ * `pushed: false` when the remote already has everything.
+ */
+async function send(
+	mountRoot: string,
+	config: RepositoryDbConfig,
+	operation: "publish" | "finish-send",
+): Promise<{ pushed: boolean; remoteChanges: string[] }> {
+	const branch = config.dataRepo.branch;
+	const remoteChanges = new Set<string>();
+	// The commit the caller confirmed. Whatever an attempt integrated, a failure
+	// returns the checkout to it, so the recorded pending commit is the shown one.
+	const localHead = gitHeadCommit(mountRoot);
+	let fetched = false;
+	for (let attempt = 1; ; attempt += 1) {
+		if (!fetched) await fetchForSend(mountRoot);
+		fetched = false;
+		const head = gitHeadCommit(mountRoot);
+		const remoteHead = remoteHeadOf(mountRoot, branch);
+		if (head && remoteHead) {
+			if (runGit(mountRoot, ["merge-base", "--is-ancestor", head, remoteHead]).status === 0) {
+				// The remote already has these commits — an earlier push arrived even
+				// though it reported failure — and maybe colleagues' work on top.
+				// Nothing to send; catch the checkout up to what is published.
+				if (head !== remoteHead) {
+					for (const entry of gitChangedPaths(mountRoot, [head, remoteHead])) remoteChanges.add(entry);
+					runGitOrThrow(mountRoot, ["reset", "--keep", remoteHead]);
+				}
+				clearDraftProvenance(mountRoot);
+				return { pushed: false, remoteChanges: [...remoteChanges] };
 			}
+			const behind = runGit(mountRoot, ["merge-base", "--is-ancestor", remoteHead, head]).status !== 0;
+			if (behind) {
+				const pending = localHead ?? head;
+				const incoming = gitChangedPaths(mountRoot, [`${head}...${remoteHead}`]);
+				for (const entry of incoming) remoteChanges.add(entry);
+				const lane = await rebaseInLane(mountRoot, head, remoteHead, config);
+				if (!lane.ok) {
+					if (head !== pending) runGitOrThrow(mountRoot, ["reset", "--keep", pending]);
+					recordSendConflict(mountRoot, config, operation, pending, {
+						kind: "merge",
+						gitState: lane.detail || "rebase stopped",
+						message: `${operation} stopped: remote changes could not be safely integrated (${
+							lane.paths.join(", ") || "see gitState"
+						})`,
+						paths: lane.paths,
+						unresolvedFields: Object.fromEntries(
+							lane.conflicts
+								.filter((entry) => entry.unresolvedFields && entry.unresolvedFields.length > 0)
+								.map((entry) => [entry.path, entry.unresolvedFields ?? []]),
+						),
+					});
+				}
+				// --keep, not --hard: if anything unexpected sits in the working tree,
+				// Git refuses instead of erasing it.
+				runGitOrThrow(mountRoot, ["reset", "--keep", lane.head]);
+				try {
+					await verifyLiveCheckout(mountRoot, config);
+				} catch (error) {
+					runGitOrThrow(mountRoot, ["reset", "--keep", pending]);
+					if (!(error instanceof MaterializeFailedError || error instanceof ValidationFailedError)) {
+						throw error;
+					}
+					recordSendConflict(mountRoot, config, operation, pending, {
+						kind: "validation",
+						gitState: "integrated result failed validation",
+						message: `${operation} stopped: the local changes on top of the colleagues' newer work failed validation; nothing was sent. ${error.message.split("\n")[0]}`,
+						paths: incoming,
+					});
+				}
+			}
+		}
+
+		const push = await runGitAsync(mountRoot, ["push", "origin", `HEAD:${branch}`]);
+		if (push.status === 0) {
+			// The draft the provenance markers described is now published.
 			clearDraftProvenance(mountRoot);
-			return { pushed: false, remoteChanges };
+			return { pushed: true, remoteChanges: [...remoteChanges] };
 		}
-		const behind = runGit(mountRoot, ["merge-base", "--is-ancestor", remoteHead, head]).status !== 0;
-		if (behind) {
-			remoteChanges = gitChangedPaths(mountRoot, [`${head}...${remoteHead}`]);
-			const lane = await rebaseInLane(mountRoot, head, remoteHead, config);
-			if (!lane.ok) {
-				const unresolvedFields = Object.fromEntries(
-					lane.conflicts
-						.filter((entry) => entry.unresolvedFields && entry.unresolvedFields.length > 0)
-						.map((entry) => [entry.path, entry.unresolvedFields ?? []]),
-				);
-				const state = writeConflictState(mountRoot, {
-					detectedAt: new Date().toISOString(),
-					operation,
-					gitState: lane.detail || "rebase stopped",
-					message: `${operation} stopped: remote changes could not be safely integrated (${
-						lane.paths.join(", ") || "see gitState"
-					})`,
-					paths: lane.paths,
-					...(Object.keys(unresolvedFields).length > 0 ? { unresolvedFields } : {}),
-					pendingHead: head,
-					// The failed integration happened entirely in the engine-owned
-					// disposable lane. The live checkout still holds the exact pending
-					// commit and has no Git operation, so a later explicit retry may
-					// safely re-fetch and re-run this same fail-closed integration.
-					retryable: true,
-					handoff: laneConflictHandoff(mountRoot, branch),
-				});
-				throw new RepositoryDbError("publish_conflict", `${state.message}\n\n${state.handoff}`);
+		// Rejected because a colleague published in the meantime? Then the next
+		// attempt integrates their work too. Any other refusal is final.
+		if (attempt < MAX_SEND_ATTEMPTS && remoteHead) {
+			const moved = await gitFetchAsync(mountRoot).then(
+				() => remoteHeadOf(mountRoot, branch) !== remoteHead,
+				() => false,
+			);
+			if (moved) {
+				fetched = true;
+				continue;
 			}
-			// --keep, not --hard: if anything unexpected sits in the working tree,
-			// Git refuses instead of erasing it.
-			runGitOrThrow(mountRoot, ["reset", "--keep", lane.head]);
 		}
-	}
-
-	const push = await runGitAsync(mountRoot, ["push", "origin", `HEAD:${branch}`]);
-	if (push.status !== 0) {
 		throw new RepositoryDbError(
 			"publish_push_failed",
 			`git push failed; the commit stays waiting to be sent (committed_not_pushed). Finish the send to retry. Detail: ${
@@ -413,17 +441,16 @@ async function send(
 			}`,
 		);
 	}
-	// The draft the provenance markers described is now published.
-	clearDraftProvenance(mountRoot);
-	return { pushed: true, remoteChanges };
 }
 
 /**
  * Publish the confirmed draft as one auditable commit and send it.
  *
- * Refuses when the draft is no longer the confirmed revision. When the send
- * fails after the commit was made, the commit stays waiting to be sent —
- * finishing that is {@link finishSend}, a separate operation.
+ * Refuses when the draft is no longer the confirmed revision, when derived
+ * output cannot be built or validation fails (nothing is staged then), and
+ * when the Environment has no Git identity. When the send fails after the
+ * commit was made, the commit stays waiting to be sent — finishing that is
+ * {@link finishSend}, a separate operation.
  */
 export async function publish(
 	mountRoot: string,
@@ -438,8 +465,9 @@ export async function publish(
 	);
 
 	assertDataRepoBoundary(mountRoot, config);
+	assertDerivedOutputIgnored(mountRoot, config);
 	assertNoActiveConflict(mountRoot);
-	assertCredentials(config.dataRepo.remote);
+	await assertCredentials(config.dataRepo.remote);
 
 	return gated(mountRoot, async () => {
 		assertNoActiveConflict(mountRoot);
@@ -447,7 +475,8 @@ export async function publish(
 		if (currentRevision !== options.expectedRevision) {
 			throw new DraftChangedError(currentRevision);
 		}
-		if (engineDirFree(gitDirtyPaths(mountRoot)).length === 0) {
+		const dirtyPaths = engineDirFree(gitDirtyPaths(mountRoot));
+		if (dirtyPaths.length === 0) {
 			if (gitAheadBehind(mountRoot, config.dataRepo.branch).ahead > 0) {
 				throw new RepositoryDbError(
 					"send_pending",
@@ -458,21 +487,26 @@ export async function publish(
 		}
 		assertCommitIdentity(mountRoot);
 
-		if (!options.skipMaterialize) materializeGenerated(mountRoot, config);
-		assertDeclaredGeneratedOnly(mountRoot, config);
-		if (!options.skipValidate) runValidateCommands(mountRoot, config);
-		// A commit already waiting below this draft leaves with it, so it is
-		// held to the same rule as when it is finished on its own.
-		assertUnsentGeneratedDeclared(mountRoot, config);
+		await verifyLiveCheckout(mountRoot, config);
+		// Materializers and validators read the checkout; they must not change
+		// what is about to be committed. Nothing is staged yet.
+		if (computeDraftRevision(mountRoot) !== options.expectedRevision) {
+			const after = engineDirFree(gitDirtyPaths(mountRoot));
+			const appeared = after.filter((entry) => !dirtyPaths.includes(entry));
+			throw new RepositoryDbError(
+				"generated_side_effect",
+				`Building derived output or validating changed tracked files${
+					appeared.length > 0 ? ` (${appeared.join(", ")})` : ""
+				}; nothing was published. Materializers and validators may write only to paths declared in generated_manifest, which the data repo ignores.`,
+			);
+		}
 
-		const dirtyPaths = engineDirFree(gitDirtyPaths(mountRoot));
 		const changeId = newChangeId();
 		try {
+			// The whole draft; never the engine's runtime layer, whatever the data
+			// repo's ignore rules say. Derived output is ignored and stays out.
 			runGitOrThrow(mountRoot, ["add", "--all"]);
-			// The engine layer (lock, conflict and provenance files) is runtime
-			// state. It never ships, whatever the checkout's ignore rules say; a
-			// lock tracked by an old engine version leaves the index here.
-			runGitOrThrow(mountRoot, ["rm", "-r", "--cached", "--quiet", "--ignore-unmatch", "--", ENGINE_DIR]);
+			runGitOrThrow(mountRoot, ["reset", "--quiet", "--", ENGINE_DIR]);
 			const staged = runGitOrThrow(mountRoot, ["diff", "--cached", "--name-only"])
 				.split("\n")
 				.filter(Boolean);
@@ -513,10 +547,14 @@ export async function publish(
 }
 
 /**
- * Finish sending the commit that was shown as waiting. Never makes a commit,
- * never validates or materializes: the commit was validated when it was made.
- * If a colleague published in the meantime, the waiting commit is replayed
- * onto their work before the push — the same commit content, a new parent.
+ * Finish sending the commit that was shown as waiting — after a failed push,
+ * or as the retry of a send the engine stopped with a recorded conflict. Never
+ * makes a commit. If a colleague published in the meantime, the waiting commit
+ * is replayed onto their work, the result is built and validated in the live
+ * checkout, and only then pushed — the same commit content, a new parent.
+ *
+ * A conflict someone else left (a rebase or merge started by hand, markers in
+ * the index, a record from an older engine) is never retried here.
  */
 export async function finishSend(
 	mountRoot: string,
@@ -529,12 +567,26 @@ export async function finishSend(
 	);
 
 	assertDataRepoBoundary(mountRoot, config);
-	assertNoActiveConflict(mountRoot);
-	assertCredentials(config.dataRepo.remote);
+	assertDerivedOutputIgnored(mountRoot, config);
+	await assertCredentials(config.dataRepo.remote);
 
 	return gated(mountRoot, async () => {
-		assertNoActiveConflict(mountRoot);
+		const conflict = activeConflict(mountRoot);
 		const head = gitHeadCommit(mountRoot);
+		if (conflict) {
+			const engineSend =
+				conflict.retryable === true &&
+				(conflict.operation === "publish" || conflict.operation === "finish-send");
+			if (!engineSend || gitOperationInProgress(mountRoot) || gitUnmergedPaths(mountRoot).length > 0) {
+				throw new ConflictActiveError(`${conflict.message}\n\n${conflict.handoff}`);
+			}
+			if (conflict.pendingHead !== head) {
+				throw new RepositoryDbError(
+					"head_changed",
+					`The checkout no longer holds the commit the conflict was recorded for (${conflict.pendingHead}, found ${head ?? "none"}). Refresh and decide again.`,
+				);
+			}
+		}
 		if (head !== options.expectedHead) {
 			throw new RepositoryDbError(
 				"head_changed",
@@ -547,76 +599,10 @@ export async function finishSend(
 				"There are draft changes beyond the commit waiting to be sent. Finishing the send would publish them unreviewed; review the draft and publish it explicitly instead.",
 			);
 		}
-		assertUnsentGeneratedDeclared(mountRoot, config);
 		assertCommitIdentity(mountRoot);
+		// A new failure replaces the old record inside send(); success clears it.
 		const { pushed, remoteChanges } = await send(mountRoot, config, "finish-send");
-		if (!pushed) return { state: "nothing_to_publish", remoteChanges };
-		return {
-			state: "published",
-			commit: gitHeadCommit(mountRoot),
-			pushedTo: `${config.dataRepo.remote}#${config.dataRepo.branch}`,
-			remoteChanges,
-		};
-	});
-}
-
-/**
- * Retry an engine-recorded send only after reconfirming the exact waiting head,
- * a clean checkout and the absence of any external Git operation. The old
- * conflict marker remains in place during the retry; a new failed integration
- * replaces it, while a successful send clears it atomically at the end.
- */
-export async function retryConflictSend(
-	mountRoot: string,
-	config: RepositoryDbConfig,
-	options: RetryConflictSendOptions,
-): Promise<PublishResult> {
-	requireText(
-		options.expectedHead,
-		"retrying a conflicted send requires the commit that was shown (expectedHead)",
-	);
-	assertDataRepoBoundary(mountRoot, config);
-	assertCredentials(config.dataRepo.remote);
-
-	return gated(mountRoot, async () => {
-		const conflict = readConflictState(mountRoot);
-		const isEngineSend = conflict?.operation === "publish" || conflict?.operation === "finish-send";
-		const isRetryable =
-			Boolean(conflict && isEngineSend && conflict.retryable) ||
-			// v3.1 conflict files did not include a pending head. Preserve a safe
-			// recovery path for them only through the exact current-head check below.
-			Boolean(conflict && isEngineSend && conflict.pendingHead === undefined);
-		if (!conflict || !isRetryable) {
-			throw new RepositoryDbError(
-				"conflict_not_retryable",
-				"Only an engine-recorded pending send can be retried. External Git conflicts must be resolved or aborted outside this API.",
-			);
-		}
-		const operation = gitOperationInProgress(mountRoot);
-		const unmerged = gitUnmergedPaths(mountRoot);
-		if (operation || unmerged.length > 0) {
-			throw new RepositoryDbError(
-				"conflict_not_retryable",
-				"Retry requires a clean engine-recorded send; an external Git operation or unresolved index is active.",
-			);
-		}
-		const head = gitHeadCommit(mountRoot);
-		if (head !== options.expectedHead || (conflict.pendingHead && conflict.pendingHead !== head)) {
-			throw new RepositoryDbError(
-				"head_changed",
-				`The commit waiting to be sent is no longer the one that was shown (expected ${options.expectedHead}, found ${head ?? "none"}). Refresh and decide again.`,
-			);
-		}
-		if (engineDirFree(gitDirtyPaths(mountRoot)).length > 0) {
-			throw new RepositoryDbError(
-				"new_draft_present",
-				"There are draft changes beyond the conflicted commit. Retrying would publish work that was not part of the shown commit.",
-			);
-		}
-		assertUnsentGeneratedDeclared(mountRoot, config);
-		assertCommitIdentity(mountRoot);
-		const { pushed, remoteChanges } = await send(mountRoot, config, "finish-send");
-		clearRecordedConflictState(mountRoot);
+		if (conflict) clearRecordedConflictState(mountRoot);
 		if (!pushed) return { state: "nothing_to_publish", remoteChanges };
 		return {
 			state: "published",
@@ -635,13 +621,24 @@ export interface PullResult {
 	remoteChanges: string[];
 }
 
+export interface PullOptions {
+	/**
+	 * Fetch first (default). A host that has just fetched passes `false`, so the
+	 * network call does not run twice.
+	 */
+	fetch?: boolean;
+}
+
 /**
  * Bring in colleagues' published work by fast-forward only.
  *
- * A draft may stay in place: Git carries local changes across a fast-forward
- * and refuses when an incoming change touches a file the draft also changed.
- * Nothing is merged into local work, so a pull never creates a conflict. When
- * local commits are waiting to be sent, finishing the send integrates instead.
+ * A draft may stay in place: the pull checks the drafted files against the
+ * incoming ones and refuses only when a colleague changed a record the draft
+ * also changes ({@link PullBlockedError} names them). The way out is to revert
+ * that record, pull, and redo the edit on top. Nothing is merged into local
+ * work, so a pull never creates a conflict. Derived output is not part of the
+ * check; it is rebuilt from the new content on its next read. When local
+ * commits wait to be sent, finishing the send integrates instead.
  *
  * The fetch runs outside the gate so a background poll never collides with a
  * running publish; only the fast-forward itself is gated.
@@ -649,11 +646,13 @@ export interface PullResult {
 export async function pullRemote(
 	mountRoot: string,
 	config: RepositoryDbConfig,
+	options: PullOptions = {},
 ): Promise<PullResult> {
 	assertDataRepoBoundary(mountRoot, config);
+	assertDerivedOutputIgnored(mountRoot, config);
 	assertNoActiveConflict(mountRoot);
 
-	await gitFetchAsync(mountRoot);
+	if (options.fetch !== false) await gitFetchAsync(mountRoot);
 	const { behind } = gitAheadBehind(mountRoot, config.dataRepo.branch);
 	if (behind === 0) return { state: "up_to_date", behind: 0, remoteChanges: [] };
 
@@ -678,19 +677,12 @@ export async function pullRemote(
 			...gitRenameSources(mountRoot).values(),
 		]);
 		const overlap = remoteChanges.filter((entry) => drafted.has(entry));
-		if (overlap.length > 0) {
-			throw new RepositoryDbError(
-				"pull_blocked_by_draft",
-				`Colleagues published changes to files this draft also changes (${overlap.join(", ")}); nothing was pulled. Publish or revert those records first.`,
-			);
-		}
+		if (overlap.length > 0) throw new PullBlockedError(overlap);
 		const merge = runGit(mountRoot, ["merge", "--ff-only", remoteRef]);
 		if (merge.status !== 0) {
-			throw new RepositoryDbError(
-				"pull_blocked_by_draft",
-				`Colleagues published changes to files this draft also changes; nothing was pulled. Publish or revert those records first. Detail: ${
-					merge.stderr.trim() || merge.stdout.trim()
-				}`,
+			throw new PullBlockedError(
+				[],
+				merge.stderr.trim() || merge.stdout.trim(),
 			);
 		}
 		return { state: "pulled", behind: behindNow, remoteChanges };

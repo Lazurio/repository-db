@@ -23,13 +23,14 @@ interface LockPayload {
 	 * doubles as the write gate: a stale-reclaimed lock and its successor can
 	 * share both, and releasing by pid would remove the successor's lock.
 	 */
-	token?: string;
+	token: string;
 	/**
 	 * The OS record of when the holding process started. Same for every thread
 	 * and module copy in one process, different for a new process that got the
 	 * same pid — which is what tells "our own live lock" from "a predecessor".
+	 * `"unavailable"` where the platform offers no cheap reading.
 	 */
-	processStart?: string;
+	processStart: string;
 }
 
 function lockPath(mountRoot: string): string {
@@ -101,14 +102,6 @@ const UNREADABLE_LOCK_GRACE_MS = 5_000;
  */
 function isLocalLockAbandoned(lock: LockPayload): boolean {
 	if (lock.pid === process.pid) {
-		// A lock from an older engine version records no process start. It can
-		// only have been left by a predecessor that ran that version — a live
-		// sibling would be running this one — so the previous age rule applies,
-		// and an upgrade after a crash does not leave the gate shut for good.
-		if (lock.processStart === undefined) {
-			const age = Date.now() - Date.parse(lock.acquiredAt);
-			return Number.isFinite(age) && age > STALE_LOCK_MS;
-		}
 		const ours = ownProcessStart();
 		// Without a reading we cannot tell a predecessor from a sibling thread,
 		// so the lock is kept: a wrongly kept lock is recoverable by hand, a
@@ -130,8 +123,8 @@ function isLocalLockAbandoned(lock: LockPayload): boolean {
  */
 function removeIfUnchanged(filePath: string, judged: LockPayload | undefined): void {
 	const current = existsSync(filePath) ? readLock(filePath) : undefined;
-	// Compared whole, not by token: locks from older engine versions have none.
-	// `undefined` on both sides means "still unreadable", which is what was judged.
+	// Compared whole: `undefined` on both sides means "still unreadable", which
+	// is what was judged.
 	if (JSON.stringify(current) !== JSON.stringify(judged)) return;
 	rmSync(filePath, { force: true });
 }
@@ -162,6 +155,13 @@ export function acquirePublishLock(mountRoot: string): () => void {
 		}
 		removeIfUnchanged(filePath, undefined);
 	}
+	if (existing && (typeof existing.token !== "string" || typeof existing.processStart !== "string")) {
+		// Written by an older repository-db, which recorded neither. It is not
+		// judged by guesswork; the operator removes it once nothing runs.
+		throw new PublishLockedError(
+			`publish lock at ${filePath} was written by an older repository-db. Clean the checkout: make sure no publish is running on ${existing.hostname} (pid ${existing.pid}), then remove that file`,
+		);
+	}
 	if (existing) {
 		const sameHost = existing.hostname === os.hostname();
 		const age = Date.now() - Date.parse(existing.acquiredAt);
@@ -187,8 +187,6 @@ export function acquirePublishLock(mountRoot: string): () => void {
 		hostname: os.hostname(),
 		acquiredAt: new Date().toISOString(),
 		token: randomUUID(),
-		// "unavailable" rather than absent: an absent field means a lock from an
-		// older engine version, which is handled differently below.
 		processStart: ownProcessStart() ?? "unavailable",
 	};
 	// "wx" fails when someone else recreated the lock between check and write.
@@ -230,7 +228,7 @@ export function acquirePublishLock(mountRoot: string): () => void {
  * engine ({@link writeRecordDraft}, `Collection.put/remove`, the CLI). A
  * process that writes the data checkout directly bypasses it and is not
  * protected: such a write can end up in a publish the user did not review.
- * Generated output is the materializer's, which runs inside publish.
+ * Derived output is an ignored cache and is not a draft write.
  */
 export function withDraftWriteLock<T>(mountRoot: string, write: () => T): T {
 	let release: () => void;

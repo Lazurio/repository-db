@@ -19,21 +19,45 @@ function conflictPath(mountRoot: string): string {
 	return path.join(mountRoot, ENGINE_DIR, CONFLICT_FILE);
 }
 
+function cleanCheckoutHandoff(filePath: string): string {
+	return [
+		"This repository-db does not undo it automatically. Clean the checkout by hand:",
+		"1. Look at `git status` and `git log @{upstream}..HEAD` in the data checkout and keep what is not published yet.",
+		"2. Bring the checkout back to a plain state on the data branch (no rebase or merge in progress).",
+		`3. Run \`repository-db conflict --resolved\`, which removes ${filePath}.`,
+	].join("\n");
+}
+
+/**
+ * A recorded conflict this engine can act on carries the pending commit. One
+ * without it was written by an older engine (or is unreadable): it is reported
+ * with a clean-the-checkout handoff, never interpreted.
+ */
+function isUsableRecord(state: ConflictState): boolean {
+	return typeof state.pendingHead === "string" && state.pendingHead.length > 0;
+}
+
 export function readConflictState(mountRoot: string): ConflictState | undefined {
 	const filePath = conflictPath(mountRoot);
 	if (!existsSync(filePath)) return undefined;
+	let parsed: ConflictState | undefined;
 	try {
-		return JSON.parse(readFileSync(filePath, "utf8")) as ConflictState;
+		parsed = JSON.parse(readFileSync(filePath, "utf8")) as ConflictState;
 	} catch {
-		return {
-			schemaVersion: "repository-db.conflict.v1",
-			detectedAt: "unknown",
-			operation: "unknown",
-			gitState: "unknown",
-			message: `conflict state file is unreadable: ${filePath}`,
-			handoff: "Inspect the data repository manually before continuing.",
-		};
+		parsed = undefined;
 	}
+	if (parsed && isUsableRecord(parsed)) return parsed;
+	return {
+		schemaVersion: "repository-db.conflict.v1",
+		detectedAt: parsed?.detectedAt ?? "unknown",
+		operation: "legacy",
+		gitState: parsed?.gitState ?? "unknown",
+		message: parsed
+			? `A conflict recorded by an older repository-db is still in this checkout (${parsed.message ?? "no message"}).`
+			: `The conflict record ${filePath} is unreadable.`,
+		handoff: cleanCheckoutHandoff(filePath),
+		retryable: false,
+	};
 }
 
 export function writeConflictState(
@@ -48,7 +72,7 @@ export function writeConflictState(
 				"repository-db zastavil další zápisy do vyřešení konfliktu.",
 				"1. Neprováděj v aktivním data mountu ruční rebase, reset ani stash.",
 				"2. Ověř panel nebo `repository-db conflict`; uvádí přesně nevyřešené soubory a pole.",
-				"3. Pokud je k dispozici `retry-send`, potvrď zobrazený HEAD; engine zkusí bezpečné sloučení.",
+				"3. Pokud je k dispozici `finish-send`, potvrď zobrazený HEAD; engine zkusí bezpečné sloučení znovu.",
 				"4. Jinak konflikt zruš přes `repository-db conflict --abort`, načti publikovaný stav a změnu proveď znovu.",
 				"5. Externí Git operaci nebo nejednoznačný business rozpor eskaluj stewardovi; data se nemění automaticky.",
 			].join("\n"),
@@ -110,8 +134,10 @@ export function assertNoActiveConflict(mountRoot: string): void {
 /**
  * Leave the conflict and return to a state the user can act on.
  *
- * - A git rebase/merge in progress (started by hand or by an older engine) is
- *   aborted; Git restores what it held.
+ * - A git rebase/merge in progress (started by hand) is aborted; Git restores
+ *   what it held.
+ * - A conflict an older engine recorded is refused with a clean-the-checkout
+ *   handoff; this engine does not guess how that engine left the checkout.
  * - A conflict the engine recorded while sending means local commits could
  *   not be replayed onto the remote. Those commits return to the draft
  *   (`reset --mixed` to where they branched off): nothing is lost, the files
@@ -128,6 +154,12 @@ export function abortConflict(mountRoot: string, branch: string): void {
 			"abortConflict needs the data branch (use RepositoryDb.abortConflict())",
 		);
 	}
+	// Before anything moves: a record this engine cannot interpret is cleaned
+	// by hand, whatever else is going on in the checkout.
+	const recorded = readConflictState(mountRoot);
+	if (recorded?.operation === "legacy") {
+		throw new RepositoryDbError("legacy_engine_state", `${recorded.message}\n\n${recorded.handoff}`);
+	}
 	const operation = gitOperationInProgress(mountRoot);
 	if (operation === "rebase-merge" || operation === "rebase-apply") {
 		runGitOrThrow(mountRoot, ["rebase", "--abort"]);
@@ -136,23 +168,12 @@ export function abortConflict(mountRoot: string, branch: string): void {
 	}
 	const unmerged = gitUnmergedPaths(mountRoot);
 	if (unmerged.length > 0) {
-		// An engine before the send lane recorded conflicted autostash applies;
-		// this version no longer restores them, so it says how to by hand.
-		const legacy = readConflictState(mountRoot) as
-			| (ConflictState & { preOperationHead?: string; autostashSha?: string })
-			| undefined;
-		if (legacy?.autostashSha) {
-			throw new RepositoryDbError(
-				"abort_incomplete",
-				`this conflict was recorded by an older repository-db, which set the draft aside in a stash. To undo it: git reset --hard ${legacy.preOperationHead ?? "<the commit before the publish>"} && git stash apply ${legacy.autostashSha}, then run conflict --resolved`,
-			);
-		}
 		throw new RepositoryDbError(
 			"abort_incomplete",
 			`unresolved conflict markers remain that repository-db did not create (${unmerged.join(", ")}); resolve them by hand, then run conflict --resolved`,
 		);
 	}
-	if (readConflictState(mountRoot)) {
+	if (recorded) {
 		const base = runGit(mountRoot, ["merge-base", "HEAD", `refs/remotes/origin/${branch}`]).stdout.trim();
 		if (!base) {
 			throw new RepositoryDbError(
