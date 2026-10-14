@@ -82,12 +82,12 @@ export interface DraftPanelRecord {
 	summary: string;
 	originLabel: string;
 	originKind: ReviewChangeOriginKind;
-	href?: string;
+	href?: string | undefined;
 	openLabel: string;
 	fields: DraftPanelFieldRow[];
 	technicalPath: string;
 	revertSupported: boolean;
-	revertBlockedReason?: string;
+	revertBlockedReason?: string | undefined;
 }
 
 export interface DraftPanelAction {
@@ -101,15 +101,15 @@ export interface DraftPanelAction {
 	label: string;
 	enabled: boolean;
 	/** Why it is disabled; shown next to the action rather than hidden. */
-	disabledReason?: string;
+	disabledReason?: string | undefined;
 	/** True when the action needs an explicit confirmation step. */
-	destructive?: boolean;
+	destructive?: boolean | undefined;
 }
 
 export interface DraftPanelModel {
 	visible: boolean;
 	/** Commit the "finish sending" action must carry. */
-	pendingHead?: string;
+	pendingHead?: string | undefined;
 	tone: DraftPanelTone;
 	/** Collapsed pill text. */
 	pill: string;
@@ -120,8 +120,8 @@ export interface DraftPanelModel {
 	/** One-line explanation at the top of the open panel. */
 	headline: string;
 	/** Says out loud that the whole draft goes out together. */
-	wholeDraftNote?: string;
-	ownerNote?: string;
+	wholeDraftNote?: string | undefined;
+	ownerNote?: string | undefined;
 	conflict?: DraftPanelConflict | null;
 	records: DraftPanelRecord[];
 	actions: DraftPanelAction[];

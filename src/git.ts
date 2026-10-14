@@ -87,7 +87,7 @@ export function runGit(
 export function runGitAsync(
 	repoRoot: string,
 	args: string[],
-	options: { timeoutMs?: number; gitBin?: string } = {},
+	options: { timeoutMs?: number | undefined; gitBin?: string | undefined } = {},
 ): Promise<GitResult> {
 	const timeoutMs = options.timeoutMs ?? DEFAULT_GIT_NETWORK_TIMEOUT_MS;
 	const gitBin = options.gitBin ?? "git";
@@ -144,7 +144,7 @@ export function runGitAsync(
 export async function runGitAsyncOrThrow(
 	repoRoot: string,
 	args: string[],
-	options: { timeoutMs?: number; gitBin?: string } = {},
+	options: { timeoutMs?: number | undefined; gitBin?: string | undefined } = {},
 ): Promise<string> {
 	const result = await runGitAsync(repoRoot, args, options);
 	if (result.status !== 0) {
