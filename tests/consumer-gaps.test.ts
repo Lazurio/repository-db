@@ -115,6 +115,32 @@ describe("remote-pulled names records in layouts the app defines", () => {
 	});
 });
 
+describe("an app's recordOf that throws", () => {
+	test("never turns a successful pull into a failure; the record falls back to the Collection layout and an error is reported", async () => {
+		const { a, b } = setup();
+		const { host, events } = track(
+			createSyncHost({
+				mountRoot: b,
+				intervalMs: 0,
+				recordOf: () => {
+					throw new Error("unexpected layout");
+				},
+			}),
+		);
+		writeFixtureDocument(a, "theirs", { code: "T" });
+		const dbA = RepositoryDb.open(a);
+		await dbA.publish({ ...PUBLISH, expectedRevision: dbA.draftRevision() });
+
+		const result = await host.run("pull", (db) => db.pull());
+		expect(result.state).toBe("pulled");
+		const pulled = events.find((event) => event.type === "remote-pulled");
+		if (pulled?.type !== "remote-pulled") throw new Error("no remote-pulled event");
+		expect(pulled.records).toEqual([{ collection: "things", id: "theirs", path: "data/things/theirs.yaml" }]);
+		const error = events.find((event) => event.type === "error");
+		expect(error?.type === "error" && error.operation).toBe("recordOf");
+	});
+});
+
 describe("publish without an explicit actor", () => {
 	test("records the Environment's Git identity as the actor; an explicit actor still wins", async () => {
 		const { a } = setup();

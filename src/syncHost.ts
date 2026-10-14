@@ -180,11 +180,21 @@ function recordRefs(
 	db: RepositoryDb,
 	paths: readonly string[],
 	recordOf: SyncHostOptions["recordOf"],
+	onError: (error: unknown) => void,
 ): SyncHostRecordRef[] {
 	const refs: SyncHostRecordRef[] = [];
 	for (const entry of [...paths].sort()) {
 		const collectionRecord = collectionRecordOf(db.config.layout.data, entry);
-		const record = recordOf ? recordOf(entry, collectionRecord) : collectionRecord;
+		let record = collectionRecord;
+		if (recordOf) {
+			// The app's mapping is its own: a throw falls back to the Collection
+			// answer and is reported; it never fails the mutation that pulled.
+			try {
+				record = recordOf(entry, collectionRecord);
+			} catch (error) {
+				onError(error);
+			}
+		}
 		if (record) refs.push({ collection: record.collection, id: record.id, path: entry });
 	}
 	return refs;
@@ -311,7 +321,9 @@ export function createSyncHost(options: SyncHostOptions): SyncHost {
 		emit({
 			type: "remote-pulled",
 			paths: [...paths],
-			records: recordRefs(db, paths, options.recordOf),
+			records: recordRefs(db, paths, options.recordOf, (error) =>
+				emit({ type: "error", operation: "recordOf", error: problemOf(error) }),
+			),
 			status,
 		});
 	}
