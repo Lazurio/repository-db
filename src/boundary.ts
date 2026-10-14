@@ -10,9 +10,9 @@ import { BoundaryViolationError, type RepositoryDbConfig } from "./types.ts";
 /**
  * Normalize Git remote URLs so that the ssh and https spellings of the same
  * GitHub repository compare equal:
- *   git@github.com:Spectoda/deals-data.git
- *   https://github.com/Spectoda/deals-data.git
- *   ssh://git@github.com/Spectoda/deals-data
+ *   git@github.com:example-org/deals-data.git
+ *   https://github.com/example-org/deals-data.git
+ *   ssh://git@github.com/example-org/deals-data
  * For non-GitHub/local remotes the absolute path is compared verbatim.
  */
 export function normalizeRemoteUrl(url: string): string {

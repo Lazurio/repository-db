@@ -13,7 +13,7 @@ import {
 import { cloneFixture, createDerivedFixture, createFixtureRepo, git, writeFixtureDocument } from "./fixtures.ts";
 
 const ANNA = "Anna <anna@example.com>";
-const AGENT = "Henry <agent@example.com>";
+const AGENT = "Agent <agent@example.com>";
 
 /** A minimal host adapter: the app knows its records have a readable name. */
 const thingAdapter: ReviewSurfaceAdapter = {
