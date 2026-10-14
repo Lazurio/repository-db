@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **Publish refuses early without a Git identity.** Before it materializes,
+  stages or replays anything, publish asks Git whether it can build an author
+  and a committer (`git var GIT_AUTHOR_IDENT` / `GIT_COMMITTER_IDENT`). If it
+  cannot, publish refuses with `identity_missing` and a user-facing message
+  (the Environment has no Git name and e-mail; signing in to GitHub in the
+  Launchpad sets them); the index, working tree and draft revision stay as they
+  were. Finishing or retrying a send checks the same, so a replay onto a
+  colleague's work no longer records a false `publish_conflict`. The engine
+  never invents an identity. Any failure between staging and a successful
+  commit (a refusing hook, a failed commit) resets the index to HEAD without
+  touching the working tree, so nothing publish staged is left behind.
+
 - **Safe semantic YAML publish merge.** A text-level rebase conflict under the
   configured canonical data layout now first attempts a deterministic YAML
   three-way merge in the temporary integration worktree. It accepts only stable
