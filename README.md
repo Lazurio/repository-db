@@ -10,6 +10,18 @@ The engine is domain-agnostic. Application schemas are injected by the host app
 through a zod-compatible parser contract; the engine itself depends only on
 `yaml`.
 
+## Documentation
+
+| Document | For |
+| --- | --- |
+| [`docs/architecture.md`](docs/architecture.md) | the one-sync-path model: lifecycle, conflicts, state files, the gate, the sync host, derived output, configuration and identity rules |
+| [`docs/app-contract.md`](docs/app-contract.md) | what an app must and must not do, error codes to surface, a minimal wiring example |
+| [`docs/migrating-a-module.md`](docs/migrating-a-module.md) | converting a module (and its data repo) onto 3.2, step by step |
+| [`docs/operations.md`](docs/operations.md) | recovery per error code, with the exact commands |
+| [`docs/draft-publish-standard.md`](docs/draft-publish-standard.md) | the user-facing Draft & Publish standard |
+| [`docs/review-surface-contract.md`](docs/review-surface-contract.md) | the review types an app adapter produces |
+| [`docs/deployment-model.md`](docs/deployment-model.md) | data generations as branches, mounting, deployments |
+
 ## Model
 
 - **Data repo** — a standalone (typically private) Git repository holding
@@ -96,8 +108,8 @@ only its HTTP/SSE wiring.
 [`docs/draft-publish-standard.md`](docs/draft-publish-standard.md) is the
 normative standard for every repository-db-backed v3 application: how a draft is
 presented, reviewed in business language, reverted and published, and what an
-agent must do around it. Read it first; the two contract documents below are its
-detailed type references.
+agent must do around it. The review types it uses are in
+[`docs/review-surface-contract.md`](docs/review-surface-contract.md).
 
 ## Review Surface and the Draft & Publish card
 
