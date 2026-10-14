@@ -9,6 +9,7 @@
  * commits, pushes, rebases or merges its data.
  */
 export { RepositoryDb } from "./repositoryDb.ts";
+export type { CommitIdentity } from "./identity.ts";
 export {
 	createSyncHost,
 	type SyncHost,

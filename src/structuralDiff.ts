@@ -111,7 +111,7 @@ function changeKindOf(before: unknown, after: unknown): ReviewFieldChangeKind {
 export function structuralDiff(
 	before: unknown,
 	after: unknown,
-	options: { maxFields?: number } = {},
+	options: { maxFields?: number | undefined } = {},
 ): StructuralDiffResult {
 	const maxFields = options.maxFields ?? DEFAULT_MAX_FIELDS;
 	const fields: ReviewFieldSummary[] = [];

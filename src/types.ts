@@ -36,9 +36,9 @@ export interface GeneratedManifestEntry {
 	 * Command building the artifact, executed with cwd = mount root. It reads
 	 * only from the data checkout and writes only to declared paths.
 	 */
-	materializer?: string;
+	materializer?: string | undefined;
 	/** Human note about what the artifact contains. */
-	note?: string;
+	note?: string | undefined;
 }
 
 export interface RepositoryDbConfig {
@@ -172,13 +172,13 @@ export interface ReviewFieldSummary {
 	label: string;
 	changeKind: ReviewFieldChangeKind;
 	/** Coarse value kind for app-agnostic review rendering and filtering. */
-	valueKind?: ReviewFieldValueKind;
+	valueKind?: ReviewFieldValueKind | undefined;
 	/** Optional generic renderer hint; never a framework/component name. */
-	renderHint?: ReviewFieldRenderHint;
+	renderHint?: ReviewFieldRenderHint | undefined;
 	/** Deterministic short display value for review lists; raw diff can be lazy. */
-	beforeSummary?: string;
+	beforeSummary?: string | undefined;
 	/** Deterministic short display value for review lists; raw diff can be lazy. */
-	afterSummary?: string;
+	afterSummary?: string | undefined;
 }
 
 /**
@@ -195,11 +195,11 @@ export type ReviewChangeOriginKind = "app" | "agent" | "unknown";
 export interface ReviewChangeOrigin {
 	kind: ReviewChangeOriginKind;
 	/** Identity of the writer, in the same format as the publish actor. */
-	actor?: string;
+	actor?: string | undefined;
 	/** Producing surface, e.g. `deals-v3` or `repository-db-cli`. */
-	source?: string;
+	source?: string | undefined;
 	/** ISO timestamp when the hint was recorded. */
-	recordedAt?: string;
+	recordedAt?: string | undefined;
 }
 
 export interface ResourceChange {
@@ -213,9 +213,9 @@ export interface ResourceChange {
 	/** Structural field summary; empty when only a raw technical diff is known. */
 	fields: ReviewFieldSummary[];
 	/** Hash of the draft content this change describes. */
-	draftContentHash?: string;
+	draftContentHash?: string | undefined;
 	/** Informational provenance; never gates an operation. */
-	origin?: ReviewChangeOrigin;
+	origin?: ReviewChangeOrigin | undefined;
 }
 
 export type ReviewInputChangeKind = ResourceChangeKind | "renamed";
@@ -227,13 +227,13 @@ export interface ReviewInputChange {
 	/** Current technical refs for the changed path. */
 	technicalRefs: ReviewTechnicalReference[];
 	/** Previous refs for moves/renames when a caller can detect them. */
-	previousTechnicalRefs?: ReviewTechnicalReference[];
+	previousTechnicalRefs?: ReviewTechnicalReference[] | undefined;
 	/** Optional deterministic raw status summary before app-specific enrichment. */
-	summary?: string;
+	summary?: string | undefined;
 	/** Hash of the current draft file/content/representation when available. */
-	draftContentHash?: string;
+	draftContentHash?: string | undefined;
 	/** Hash of the baseline file/content when available. */
-	baselineContentHash?: string;
+	baselineContentHash?: string | undefined;
 	/**
 	 * Baseline file content, when the engine already read it.
 	 *
@@ -242,18 +242,18 @@ export interface ReviewInputChange {
 	 * `git show` per record, which is the difference between a snappy review and
 	 * a stalled request on a large draft.
 	 */
-	baselineText?: string;
+	baselineText?: string | undefined;
 	/**
 	 * Draft content exactly as Git would publish it: the file's text, or a
 	 * symlink's target path (never the linked file). Undefined when the path is
 	 * gone, binary/unreadable, or has a symlinked directory component. Adapters
 	 * read the draft from here and never from the filesystem.
 	 */
-	draftText?: string;
+	draftText?: string | undefined;
 	/** Informational provenance; never gates an operation. */
-	origin?: ReviewChangeOrigin;
+	origin?: ReviewChangeOrigin | undefined;
 	/** Non-secret JSON metadata for diagnostics; not a UI label. */
-	metadata?: JsonObject;
+	metadata?: JsonObject | undefined;
 }
 
 /** Ordered degradation levels for review surfaces. */
@@ -268,9 +268,9 @@ export interface ReviewFallbackStep {
 	/** User-facing description of what this step can still show. */
 	label: string;
 	/** Why the richer level was unavailable, or why this level was chosen. */
-	reason?: string;
+	reason?: string | undefined;
 	/** Technical evidence exposed only in details/agent views. */
-	technicalRefs?: ReviewTechnicalReference[];
+	technicalRefs?: ReviewTechnicalReference[] | undefined;
 }
 
 export interface ReviewFallbackLadder {
@@ -358,20 +358,20 @@ export interface ReviewSurfaceSnapshot {
 	 * to exactly what was shown. Reading it separately after a review would
 	 * reintroduce the gap it exists to close.
 	 */
-	draftRevision?: string;
+	draftRevision?: string | undefined;
 	/** HEAD at review time; used to finish sending exactly this commit. */
-	head?: string;
-	computedAt?: string;
+	head?: string | undefined;
+	computedAt?: string | undefined;
 	/** Raw input changes used to compute the resource representation, if retained. */
-	inputChanges?: ReviewInputChange[];
+	inputChanges?: ReviewInputChange[] | undefined;
 	resources: ReviewableResource[];
 	publishReadiness: PublishReadinessSummary;
 	/** Aggregate fallback diagnostics for snapshot-level consumers. */
 	fallback: ReviewFallbackLadder;
 	/** Hash of the snapshot review representation for coarse invalidation. */
-	reviewRepresentationHash?: string;
+	reviewRepresentationHash?: string | undefined;
 	/** Non-secret JSON metadata for diagnostics or host grouping. */
-	metadata?: JsonObject;
+	metadata?: JsonObject | undefined;
 }
 
 export interface ReviewSurfaceAdapter<TChange = ReviewInputChange> {
@@ -402,7 +402,7 @@ export interface CommitTrailers {
 	machine: string;
 	source: string;
 	changeId: string;
-	entities?: string[];
+	entities?: string[] | undefined;
 }
 
 export interface PublishOptions {
@@ -410,7 +410,7 @@ export interface PublishOptions {
 	 * Human actor recorded in the commit trailers, e.g. `Jana <jana@example.com>`.
 	 * Defaults to the Environment's Git author identity (`Name <email>`).
 	 */
-	actor?: string;
+	actor?: string | undefined;
 	/**
 	 * Revision of the draft being confirmed. Publish runs only if the draft is
 	 * still exactly that version when the shared gate is taken. A caller with
@@ -420,9 +420,9 @@ export interface PublishOptions {
 	/** Producing surface, e.g. `sample-app-v1` or `repository-db-cli`. */
 	source: string;
 	/** Optional human summary used as the first commit-message line. */
-	summary?: string;
+	summary?: string | undefined;
 	/** Optional entity identifiers recorded in the optional trailer. */
-	entities?: string[];
+	entities?: string[] | undefined;
 }
 
 export interface FinishSendOptions {
@@ -437,14 +437,14 @@ export interface FinishSendOptions {
 export interface PublishResult {
 	/** `published` on success. */
 	state: "published" | "nothing_to_publish";
-	commit?: string;
-	changeId?: string;
-	pushedTo?: string;
+	commit?: string | undefined;
+	changeId?: string | undefined;
+	pushedTo?: string | undefined;
 	/**
 	 * Paths a colleague had published in the meantime that this send
 	 * integrated under the local work. Empty when the remote had not moved.
 	 */
-	remoteChanges?: string[];
+	remoteChanges?: string[] | undefined;
 }
 
 /**

@@ -11,6 +11,7 @@ import {
 import { CONFIG_FILE_NAME, compatibleConfig, liveConfig } from "./config.ts";
 import { assertCredentials } from "./credentials.ts";
 import { DraftChangedError } from "./discard.ts";
+import { readCommitIdentity } from "./identity.ts";
 import { computeDraftRevision } from "./draftRevision.ts";
 import {
 	gitAheadBehind,
@@ -133,8 +134,11 @@ function assertCommitIdentity(mountRoot: string): void {
  * as `Name <email>` — the identity the commit is made with anyway.
  */
 function identityActor(mountRoot: string): string {
-	const ident = runGitOrThrow(mountRoot, ["-c", "user.useConfigOnly=true", "var", "GIT_AUTHOR_IDENT"]).trim();
-	return ident.replace(/\s+\d+\s+[+-]\d{4}$/, "");
+	const identity = readCommitIdentity(mountRoot);
+	if (!identity) {
+		throw new RepositoryDbError("identity_missing", "This Environment has no Git name and e-mail to record as the actor.");
+	}
+	return `${identity.name} <${identity.email}>`;
 }
 
 /** Derived output first, then the validators that may read it; both in the live checkout. */

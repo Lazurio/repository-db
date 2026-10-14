@@ -17,6 +17,7 @@ import {
 	type RevertAvailability,
 } from "./discard.ts";
 import { computeDraftRevision } from "./draftRevision.ts";
+import { type CommitIdentity, readCommitIdentity } from "./identity.ts";
 import {
 	type DraftOriginKind,
 	type DraftOwner,
@@ -102,6 +103,17 @@ export class RepositoryDb {
 
 	collection<T>(name: string, options: CollectionOptions<T>): Collection<T> {
 		return new Collection<T>(this.mountRoot, this.config, name, options);
+	}
+
+	/**
+	 * The name and e-mail this Environment commits with, resolved exactly like
+	 * the publish preflight (configured or explicitly passed, never guessed), or
+	 * `null` when there is none. Read-only. Apps use it as the default author of
+	 * a record when no verified sign-in names one.
+	 */
+	identity(): CommitIdentity | null {
+		assertDataRepoBoundary(this.mountRoot, this.config);
+		return readCommitIdentity(this.mountRoot);
 	}
 
 	/** Local sync state (no network). Use {@link statusAsync} for a fresh `behind`. */

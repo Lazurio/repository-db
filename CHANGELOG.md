@@ -1,5 +1,24 @@
 # Changelog
 
+## 3.2.2 — 2026-10-14
+
+- **Consumers with strict compiler settings typecheck the engine** (#28). The
+  package ships its `.ts` sources, so a consumer's `tsc` checks them with the
+  consumer's options. The engine's own `tsconfig.json` now enables the strict
+  flags consumers use — `exactOptionalPropertyTypes`, `noImplicitOverride`,
+  `isolatedModules`, `erasableSyntaxOnly`, `noUncheckedSideEffectImports` (next
+  to the existing `strict`, `noUncheckedIndexedAccess`, `verbatimModuleSyntax`,
+  `noUnused*`) — so `bunx tsc --noEmit` keeps it that way. Optional properties
+  the engine fills or accepts possibly-undefined values for are declared
+  `prop?: T | undefined` (review, card, publish, config and Git option types);
+  this only widens them, no call site changes.
+- **`db.identity()`** (#26): the name and e-mail this Environment commits with,
+  `{ name, email } | null`, resolved exactly like the publish preflight
+  (`user.useConfigOnly`: configured or explicitly passed, never guessed).
+  Read-only; also through `host.read`. The publish actor default uses the same
+  resolver. Apps use it to attribute records when no verified sign-in names the
+  author. New type export `CommitIdentity`.
+
 ## 3.2.1 — 2026-10-14
 
 - **An identity Git only guessed no longer counts.** The identity preflight,

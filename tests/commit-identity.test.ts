@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { RepositoryDb } from "../src/repositoryDb.ts";
+import { createSyncHost } from "../src/syncHost.ts";
 import { type FixtureRepo, cloneFixture, createFixtureRepo, git, writeFixtureDocument } from "./fixtures.ts";
 
 const IDENTITY_ENV = [
@@ -128,5 +129,61 @@ describe("commit identity", () => {
 		expect(result.state).toBe("published");
 		expect(stagedPaths(fixture.mountPath)).toEqual([]);
 		expect(git(fixture.originPath, ["rev-parse", fixture.branch]).trim()).toBe(result.commit ?? "");
+	});
+});
+
+describe("the Environment's identity, read-only", () => {
+	let saved: Partial<Record<(typeof IDENTITY_ENV)[number], string>> = {};
+	let fixture: FixtureRepo;
+
+	beforeEach(() => {
+		saved = Object.fromEntries(IDENTITY_ENV.map((key) => [key, process.env[key]]));
+		fixture = createFixtureRepo();
+	});
+
+	afterEach(() => {
+		for (const key of IDENTITY_ENV) {
+			if (saved[key] === undefined) delete process.env[key];
+			else process.env[key] = saved[key];
+		}
+		rmSync(fixture.root, { recursive: true, force: true });
+	});
+
+	test("a configured identity is returned as name and e-mail, also through the sync host", async () => {
+		const db = RepositoryDb.open(fixture.mountPath);
+		expect(db.identity()).toEqual({ name: "Repository Db Fixture", email: "fixture@repository-db.test" });
+		const host = createSyncHost({ mountRoot: fixture.mountPath, intervalMs: 0 });
+		expect(await host.read((facade) => facade.identity())).toEqual({
+			name: "Repository Db Fixture",
+			email: "fixture@repository-db.test",
+		});
+	});
+
+	test("an identity passed explicitly to Git counts, like it does for the commit", () => {
+		removeCommitIdentity(fixture);
+		process.env.GIT_AUTHOR_NAME = "Passed Explicitly";
+		process.env.GIT_AUTHOR_EMAIL = "passed@repository-db.test";
+		expect(RepositoryDb.open(fixture.mountPath).identity()).toEqual({
+			name: "Passed Explicitly",
+			email: "passed@repository-db.test",
+		});
+	});
+
+	test("without an identity it is null, and nothing in the checkout changes", () => {
+		removeCommitIdentity(fixture);
+		const db = RepositoryDb.open(fixture.mountPath);
+		const revision = db.draftRevision();
+		expect(db.identity()).toBeNull();
+		expect(db.draftRevision()).toBe(revision);
+	});
+
+	test("an identity Git would only guess (account name and host name) is null too", () => {
+		removeCommitIdentity(fixture);
+		// No useConfigOnly in the Environment's own config: a plain `git var`
+		// may now guess from the account and the host name. identity() must not.
+		const globalConfig = path.join(fixture.root, "guessing-global.gitconfig");
+		writeFileSync(globalConfig, "", "utf8");
+		process.env.GIT_CONFIG_GLOBAL = globalConfig;
+		expect(RepositoryDb.open(fixture.mountPath).identity()).toBeNull();
 	});
 });
