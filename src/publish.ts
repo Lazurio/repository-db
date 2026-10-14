@@ -418,7 +418,14 @@ async function send(
 				// though it reported failure — and maybe colleagues' work on top.
 				// Nothing to send; catch the checkout up to what is published.
 				if (head !== remoteHead) {
-					for (const entry of gitChangedPaths(mountRoot, [head, remoteHead])) remoteChanges.add(entry);
+					const caughtUp = gitChangedPaths(mountRoot, [head, remoteHead]);
+					// Catching up is a pull: the configuration it brings is held to the
+					// opened boundary before anything moves.
+					if (caughtUp.includes(CONFIG_FILE_NAME)) {
+						const incoming = runGit(mountRoot, ["show", `${remoteHead}:${CONFIG_FILE_NAME}`]);
+						compatibleConfig(config, incoming.status === 0 ? incoming.stdout : undefined, "published by a colleague");
+					}
+					for (const entry of caughtUp) remoteChanges.add(entry);
 					runGitOrThrow(mountRoot, ["reset", "--keep", remoteHead]);
 				}
 				clearDraftProvenance(mountRoot);

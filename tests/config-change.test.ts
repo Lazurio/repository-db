@@ -94,6 +94,29 @@ describe("a send validates the integrated result with the configuration it now h
 		expect(dbB.status().state).toBe("committed_not_pushed");
 		expect(remoteHead(fixture)).toBe(remoteBefore);
 	});
+
+	test("a push that arrived although it reported failure, then a colleague's layout change: finishing refuses without moving", async () => {
+		const { fixture, a, b } = setup();
+		const dbB = RepositoryDb.open(b);
+		// B's commit reached the remote, but B never heard back.
+		writeFixtureDocument(b, "mine", { code: "M" });
+		git(b, ["add", "--all"]);
+		git(b, ["commit", "--message", "lost push"]);
+		const pending = git(b, ["rev-parse", "HEAD"]).trim();
+		git(b, ["push", "--quiet", "origin", `HEAD:${fixture.branch}`]);
+		git(b, ["update-ref", `refs/remotes/origin/${fixture.branch}`, `${pending}~1`]);
+		// A colleague then moves the data layout on top of it.
+		git(a, ["pull", "--quiet", "--ff-only", "origin", fixture.branch]);
+		editConfig(a, (text) => text.replace("data: data", "data: records"));
+		git(a, ["add", "--all"]);
+		git(a, ["commit", "--message", "move the data layout"]);
+		git(a, ["push", "--quiet", "origin", fixture.branch]);
+
+		const refused = await errorOf(() => dbB.finishSend({ expectedHead: pending }));
+		expect(refused.code).toBe("config_changed");
+		expect(git(b, ["rev-parse", "HEAD"]).trim()).toBe(pending);
+		expect(readFileSync(path.join(b, "repository-db.yaml"), "utf8")).toContain("data: data");
+	});
 });
 
 describe("a pull brings in configuration, and the checkout uses it", () => {
