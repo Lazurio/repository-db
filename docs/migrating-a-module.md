@@ -13,6 +13,12 @@ A conversion is **two pull requests, released in one window**:
 Their order matters: 3.2 refuses a data repo that still tracks derived output,
 and an app on an older version keeps committing derived output.
 
+When several conversions run at once (one agent per module, often in different
+Organizations), keep every scratch file — PR bodies, fixtures, test servers'
+state — in a directory unique to the conversion, never a shared path such as
+`/tmp/pr-body.md`. A shared path lets one conversion's text land in another
+Organization's pull request. Stop local test servers by their exact process id.
+
 ## 0. Inventory
 
 In the module and its data repo, write down:
