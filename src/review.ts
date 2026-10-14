@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { lstatSync, readFileSync, readlinkSync } from "node:fs";
+import { lstatSync, readFileSync, readlinkSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { assertDataRepoBoundary } from "./boundary.ts";
 import { activeConflict } from "./conflict.ts";
@@ -106,6 +106,15 @@ function baselineContent(
 
 function workingContent(mountRoot: string, relativePath: string): string | undefined {
 	const absolute = path.join(mountRoot, relativePath);
+	// A path whose directory resolves outside the checkout (a symlinked
+	// component) is never read: Git would not publish what lies behind it.
+	try {
+		const root = realpathSync(mountRoot);
+		const directory = realpathSync(path.dirname(absolute));
+		if (directory !== root && !directory.startsWith(`${root}${path.sep}`)) return undefined;
+	} catch {
+		return undefined;
+	}
 	let stats: ReturnType<typeof lstatSync>;
 	try {
 		stats = lstatSync(absolute);
@@ -300,6 +309,7 @@ export function collectInputChanges(
 			draftContentHash: draft === undefined ? undefined : sha256(draft),
 			baselineContentHash: baseline === undefined ? undefined : sha256(baseline),
 			baselineText: baseline,
+			draftText: draft,
 			origin: toOrigin(origins.get(relativePath)),
 		} satisfies ReviewInputChange;
 	});

@@ -243,6 +243,13 @@ export interface ReviewInputChange {
 	 * a stalled request on a large draft.
 	 */
 	baselineText?: string;
+	/**
+	 * Draft content exactly as Git would publish it: the file's text, or a
+	 * symlink's target path (never the linked file). Undefined when the path is
+	 * gone, binary/unreadable, or reaches outside the data checkout. Adapters
+	 * read the draft from here and never from the filesystem.
+	 */
+	draftText?: string;
 	/** Informational provenance; never gates an operation. */
 	origin?: ReviewChangeOrigin;
 	/** Non-secret JSON metadata for diagnostics; not a UI label. */

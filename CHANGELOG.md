@@ -1,5 +1,15 @@
 # Changelog
 
+## 3.2.1 — 2026-10-14
+
+- **Review adapters get the draft content from the engine.** `ReviewInputChange`
+  carries `draftText`: the draft exactly as Git would publish it — the file's
+  text, or a symlink's target path, never the linked file — and undefined when
+  the path is gone, unreadable, or its directory resolves outside the data
+  checkout. Adapters read `draftText`/`baselineText` and never the filesystem
+  (docs/app-contract.md); an adapter that followed a symlink could put a host
+  file into the review payload.
+
 ## 3.2.0 — 2026-10-14
 
 **Upgrade note.** 3.2 is the one sync path: derived output becomes an ignored
