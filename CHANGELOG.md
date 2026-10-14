@@ -2,6 +2,18 @@
 
 ## 3.2.1 — 2026-10-14
 
+- **An identity Git only guessed no longer counts.** The identity preflight,
+  the default actor and the publish commit run with `user.useConfigOnly=true`:
+  on a workstation Git would otherwise invent a name and a `user@host.local`
+  address, and the publish went out under it. Only a configured or explicitly
+  passed identity is used; otherwise `identity_missing`.
+- **`empty_repository`.** Opening a data checkout without a first commit fails
+  with this typed error instead of a Git error; the sync host treats it like an
+  unavailable mount and opens it again on a later check.
+- **SSH keys the agent does not hold.** When neither `gh`, ssh-agent nor a
+  credential helper proves access, the credential preflight asks the SSH
+  remote itself with a non-interactive `git ls-remote` (mechanism
+  `ssh-config`), so a deploy key configured in `~/.ssh/config` works.
 - **Review adapters get the draft content from the engine.** `ReviewInputChange`
   carries `draftText`: the draft exactly as Git would publish it — the file's
   text, or a symlink's target path, never the linked file — and undefined when
