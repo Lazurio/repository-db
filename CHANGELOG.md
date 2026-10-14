@@ -17,7 +17,8 @@
     in drafts, pull overlap checks, conflicts, review or discard.
   - Publish: identity → build derived output and validate in the live checkout
     (a command that changes a tracked file refuses with
-    `generated_side_effect`) → commit the tracked draft → send. The send lane
+    `generated_side_effect`, and what it changed is put back; commands get a
+    closed stdin) → commit the tracked draft → send. The send lane
     does Git only (text rebase plus the semantic YAML merge); the checkout moves
     to the result with `reset --keep`, derived output is rebuilt and validated
     there, and on failure the checkout returns to the local commit with a

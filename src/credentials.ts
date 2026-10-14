@@ -81,7 +81,7 @@ function tryRun(
 				});
 			},
 		);
-		if (options.input !== undefined) child.stdin?.end(options.input);
+		child.stdin?.end(options.input ?? "");
 	});
 }
 

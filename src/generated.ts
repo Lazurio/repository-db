@@ -47,7 +47,7 @@ type CommandOutcome = { ok: true } | { ok: false; detail: string };
 /** Run one data-repo command with cwd = mount root, off the event loop. */
 function runCommand(command: string, mountRoot: string): Promise<CommandOutcome> {
 	return new Promise((resolve) => {
-		exec(
+		const child = exec(
 			command,
 			{
 				cwd: mountRoot,
@@ -69,6 +69,8 @@ function runCommand(command: string, mountRoot: string): Promise<CommandOutcome>
 				resolve({ ok: false, detail });
 			},
 		);
+		// No input: a command that reads stdin gets EOF instead of waiting.
+		child.stdin?.end();
 	});
 }
 

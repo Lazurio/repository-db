@@ -191,6 +191,28 @@ describe("materializers and validators run in the live checkout", () => {
 		expect(dbB.draftRevision()).toBe(revision);
 	});
 
+	test("a validator that rewrites the draft or adds a file refuses publish and leaves the draft as it was", async () => {
+		const { b } = setup();
+		writeFileSync(
+			path.join(b, "scripts/validate.sh"),
+			"set -e\necho rewritten >> data/things/mine.yaml\necho junk > data/things/junk.yaml\n",
+			"utf8",
+		);
+		const dbB = RepositoryDb.open(b);
+		writeFixtureDocument(b, "mine", { code: "M" });
+		const revision = dbB.draftRevision();
+		const drafted = readFileSync(path.join(b, "data/things/mine.yaml"), "utf8");
+
+		for (let attempt = 0; attempt < 2; attempt += 1) {
+			const refused = await errorOf(() => publishAll(dbB));
+			expect(refused.code).toBe("generated_side_effect");
+			expect(dbB.draftRevision()).toBe(revision);
+			expect(readFileSync(path.join(b, "data/things/mine.yaml"), "utf8")).toBe(drafted);
+			expect(existsSync(path.join(b, "data/things/junk.yaml"))).toBe(false);
+			expect(staged(b)).toBe("");
+		}
+	});
+
 	test("an integrated result that fails validation moves the checkout back to the local commit, records a conflict and pushes nothing", async () => {
 		const { fixture, a, b } = setup();
 		const dbA = RepositoryDb.open(a);
@@ -254,6 +276,17 @@ describe("materializers and validators run in the live checkout", () => {
 		rmSync(marker);
 		expect((await dbB.finishSend({ expectedHead: pending })).state).toBe("published");
 		expect(dbB.conflict()).toBeUndefined();
+	});
+
+	test("a command that reads stdin gets end-of-file instead of holding the gate", async () => {
+		const { b } = setup();
+		writeFileSync(path.join(b, "scripts/validate.sh"), "cat > /dev/null\n", "utf8");
+		const dbB = RepositoryDb.open(b);
+		writeFixtureDocument(b, "mine", { code: "M" });
+		const started = Date.now();
+		// The changed validator is part of the draft, which is fine for this check.
+		expect((await publishAll(dbB)).state).toBe("published");
+		expect(Date.now() - started).toBeLessThan(15_000);
 	});
 
 	test("a materializer that changes tracked files on the integrated result is undone and recorded, nothing is pushed", async () => {

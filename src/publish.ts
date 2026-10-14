@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { lstatSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { assertDataRepoBoundary } from "./boundary.ts";
@@ -366,6 +366,26 @@ function restoreCommandSideEffects(mountRoot: string, before: ReadonlySet<string
 	return touched;
 }
 
+/** The drafted bytes of regular files, so a command that rewrites them can be undone. */
+function snapshotDraft(mountRoot: string, dirtyPaths: readonly string[]): Map<string, Buffer | null> {
+	const snapshot = new Map<string, Buffer | null>();
+	for (const entry of dirtyPaths) {
+		const absolute = path.join(mountRoot, entry);
+		const stats = lstatSync(absolute, { throwIfNoEntry: false });
+		if (!stats) snapshot.set(entry, null);
+		else if (stats.isFile()) snapshot.set(entry, readFileSync(absolute));
+	}
+	return snapshot;
+}
+
+function restoreDraft(mountRoot: string, snapshot: ReadonlyMap<string, Buffer | null>): void {
+	for (const [entry, bytes] of snapshot) {
+		const absolute = path.join(mountRoot, entry);
+		if (bytes === null) rmSync(absolute, { force: true, recursive: true });
+		else writeFileSync(absolute, bytes);
+	}
+}
+
 function remoteHeadOf(mountRoot: string, branch: string): string {
 	return runGit(mountRoot, ["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${branch}`]).stdout.trim();
 }
@@ -533,12 +553,14 @@ export async function publish(
 		}
 		assertCommitIdentity(mountRoot);
 
+		const drafted = snapshotDraft(mountRoot, dirtyPaths);
 		await verifyLiveCheckout(mountRoot, config);
 		// Materializers and validators read the checkout; they must not change
-		// what is about to be committed. Nothing is staged yet.
+		// what is about to be committed. Nothing is staged yet, and what they
+		// changed is put back, so a second attempt cannot commit it either.
 		if (computeDraftRevision(mountRoot) !== options.expectedRevision) {
-			const after = engineDirFree(gitDirtyPaths(mountRoot));
-			const appeared = after.filter((entry) => !dirtyPaths.includes(entry));
+			const appeared = restoreCommandSideEffects(mountRoot, new Set(dirtyPaths));
+			restoreDraft(mountRoot, drafted);
 			throw new RepositoryDbError(
 				"generated_side_effect",
 				`Building derived output or validating changed tracked files${
