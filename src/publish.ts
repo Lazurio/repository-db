@@ -553,14 +553,24 @@ export async function publish(
 		}
 		assertCommitIdentity(mountRoot);
 
-		const drafted = snapshotDraft(mountRoot, dirtyPaths);
-		await verifyLiveCheckout(mountRoot, config);
 		// Materializers and validators read the checkout; they must not change
-		// what is about to be committed. Nothing is staged yet, and what they
-		// changed is put back, so a second attempt cannot commit it either.
-		if (computeDraftRevision(mountRoot) !== options.expectedRevision) {
+		// what is about to be committed. Nothing is staged yet, and whatever they
+		// changed is put back — whether they passed or failed — so neither this
+		// attempt nor the next can commit it.
+		const drafted = snapshotDraft(mountRoot, dirtyPaths);
+		const undoCommands = () => {
 			const appeared = restoreCommandSideEffects(mountRoot, new Set(dirtyPaths));
 			restoreDraft(mountRoot, drafted);
+			return appeared;
+		};
+		try {
+			await verifyLiveCheckout(mountRoot, config);
+		} catch (error) {
+			if (computeDraftRevision(mountRoot) !== options.expectedRevision) undoCommands();
+			throw error;
+		}
+		if (computeDraftRevision(mountRoot) !== options.expectedRevision) {
+			const appeared = undoCommands();
 			throw new RepositoryDbError(
 				"generated_side_effect",
 				`Building derived output or validating changed tracked files${

@@ -278,6 +278,23 @@ describe("materializers and validators run in the live checkout", () => {
 		expect(dbB.conflict()).toBeUndefined();
 	});
 
+	test("a validator that changes the draft and then fails leaves the draft as it was", async () => {
+		const { b } = setup();
+		writeFileSync(
+			path.join(b, "scripts/validate.sh"),
+			"echo rewritten >> data/things/mine.yaml\necho junk > data/things/junk.yaml\nexit 9\n",
+			"utf8",
+		);
+		const dbB = RepositoryDb.open(b);
+		writeFixtureDocument(b, "mine", { code: "M" });
+		const revision = dbB.draftRevision();
+		const refused = await errorOf(() => publishAll(dbB));
+		expect(refused.code).toBe("validation_failed");
+		expect(dbB.draftRevision()).toBe(revision);
+		expect(existsSync(path.join(b, "data/things/junk.yaml"))).toBe(false);
+		expect(staged(b)).toBe("");
+	});
+
 	test("a command that reads stdin gets end-of-file instead of holding the gate", async () => {
 		const { b } = setup();
 		writeFileSync(path.join(b, "scripts/validate.sh"), "cat > /dev/null\n", "utf8");
