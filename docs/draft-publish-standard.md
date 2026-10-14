@@ -8,9 +8,9 @@ lifecycle is presented, reviewed, reverted and published.
 
 It is deliberately small. Where something cannot be supported simply and safely,
 the standard says so and the app does not offer it, rather than growing another
-mechanism. [`draft-publish-card-contract.md`](draft-publish-card-contract.md) and
-[`review-surface-contract.md`](review-surface-contract.md) remain the detailed
-type references for the shapes used here.
+mechanism. [`review-surface-contract.md`](review-surface-contract.md) remains the
+detailed type reference for the review shapes used here; the card's view model
+is `deriveDraftPanel` in the core package.
 
 ## The product problem
 
@@ -18,7 +18,7 @@ A person must be able to answer four questions without opening Git:
 
 1. **Is anything unpublished right now?**
 2. **What exactly changed, in business language?** — `data/deals/deal-1002.yaml`
-   is not an answer; "ANTANA Group — Stav: Interested → Price offer" is.
+   is not an answer; "Example Partner — Stav: Interested → Price offer" is.
 3. **Where did the change come from?** — the app, an agent, or not known.
 4. **How do I take back something I did not want?**
 
@@ -77,17 +77,19 @@ legacy v2 data and `db/` is the v3 repository-db mount.
 
 ```
 app screens ──────────── inline "Rozpracováno" marks
-shared card ──────────── one draft, its changes, publish / revert
-host app API ─────────── /api/<app>/draft/{status,review,discard,publish}
-repository-db engine ─── status · review() · discard() · publish() · CLI
+shared card ──────────── one draft, its changes, publish / revert (deriveDraftPanel)
+host app API ─────────── /api/<app>/draft/{status,review,discard,publish,events}
+host sync service ────── createSyncHost: mutation queue · status · events · auto-pull
+repository-db engine ─── status · review() · discard() · publish() · pull() · CLI
 ```
 
-- The engine owns Git truth, the review computation, discard and publish. No UI,
-  no business schemas.
+- The engine owns Git truth, the review computation, discard, publish, pull and
+  the host-side sync loop. No UI framework, no business schemas.
 - The app supplies three things only: a review adapter (paths → business labels
-  and routes), routing, and authorization of its endpoints.
-- An app does not implement its own draft state priority, discard logic or
-  publish path.
+  and routes), its HTTP/SSE routes over the sync host, and authorization of its
+  endpoints.
+- An app does not implement its own draft state priority, discard logic,
+  publish path, mutation queue or remote monitor, and never runs Git on its data.
 
 ## The write contract — the same for the app and for an agent
 
@@ -125,15 +127,14 @@ A record revert is **not offered** when:
 
 | Situation | Why |
 | --- | --- |
-| generated data is also in the draft | reverting one record alone would leave it inconsistent |
 | the record was renamed in the draft | reverting one side would leave the other behind |
-| the path is generated output | it is rebuilt on publish; revert its source record |
 | the path is not canonical data | not a record |
 | a commit is waiting to be sent | HEAD is not the published state (rule 5) |
 | the repository is in conflict | recovery finishes first; the draft stays visible |
 
 `canRevertRecord()` answers this before the UI draws a button, so a user is never
-offered an action that then refuses.
+offered an action that then refuses. Derived output is never part of a draft, so
+it never stands in the way of a revert; it is rebuilt from what remains.
 
 ### The publish lifecycle — one owner
 
@@ -143,20 +144,52 @@ shared gate.
 
 | Operation | Takes | Does | Never |
 | --- | --- | --- | --- |
-| `publish` | the draft revision that was shown (required) | checks it, validates, materializes generated output, makes one audited commit, sends | publishes a draft other than the confirmed one |
-| `finishSend` | the head of the commit shown as waiting (required) | checks it and that no new draft exists, sends | makes a commit, validates, materializes or repairs anything |
-| `pull` | — | fast-forwards to colleagues' published work | merges into local work |
+| `publish` | the draft revision that was shown (required) | checks it and the Git identity, builds derived output and validates **in the live checkout**, makes one audited commit of the tracked draft, sends | publishes a draft other than the confirmed one; stages anything when building or validating fails |
+| `finishSend` | the head of the commit shown as waiting (required) | checks it and that no new draft exists, sends; also the retry of a send the engine stopped with a conflict | makes a commit or retries a conflict someone else left |
+| `pull` | — | fast-forwards to colleagues' published work, also under a draft of other records | merges into local work |
 
 **Sending** fetches first. When a colleague published in the meantime, the local
-commits are replayed onto their work in a **separate temporary worktree**; the
-checkout moves to the result only if that succeeded, and with `reset --keep`,
-which refuses rather than erases anything unexpected. The checkout is never left
+commits are replayed onto their work in a **separate temporary worktree** that
+does Git work only: the text rebase, and for a text conflict in canonical YAML
+the conservative semantic merge. The live checkout moves to the result only if
+that succeeded, and with `reset --keep`, which refuses rather than erases
+anything unexpected. There — where the data repo's dependencies are — derived
+output is rebuilt and the validators run on the integrated result. If they
+fail, the checkout moves back to the local commit, a conflict of kind
+`validation` is recorded and nothing is pushed. A push the remote moved under
+again is integrated anew, a bounded number of times. The checkout is never left
 mid-rebase. A replayed waiting commit keeps its content and message and gets a
 new parent; finishing a send never adds a commit.
 
 A **push that fails** after the commit leaves that commit waiting (rule 5). The
 next step is `finishSend` with the head the review showed. `publish` with no new
-draft refuses and points there.
+draft refuses and points there. A **recorded conflict** (`merge` or
+`validation`) has two ways out: `finishSend` with the recorded pending head
+retries the integration (once a colleague fixed their side), or `conflict
+--abort` returns the commit to the draft; then revert the record in question,
+pull, and redo the edit on top — the rest of the draft stays.
+
+### Derived output
+
+`generated_manifest` declares derived output: read models built from the data by
+materializer commands of the data repo. It is an **ignored cache**: every
+declared path is untracked and covered by the data repo's `.gitignore`, and the
+engine refuses a checkout that still tracks one, naming the one-time migration
+(`git rm -r --cached <path>`, the `.gitignore` line, an ordinary commit).
+
+- Readers call `ensureGenerated()` before reading a derived path; it rebuilds
+  only when the tracked content (HEAD tree plus draft bytes) changed since the
+  last build. Pull, send, discard and record writes make it stale by changing
+  that content; nobody marks anything.
+- A failing materializer is a typed error to the reader (`materialize_failed`)
+  and blocks publish; it never stages anything and never creates a draft.
+- Derived files never appear in a draft, an overlap check, a conflict, review or
+  discard, so two people changing different records cannot collide on them.
+- Materializers and validators run with cwd = the data checkout, use its
+  dependencies, read only from it and write only to declared paths. A command
+  that changes a tracked file refuses the publish (`generated_side_effect`).
+- Derived output is not a contract between modules: another module reads `data/`
+  or the owner's API.
 
 **A conflict** while replaying — someone changed the same files — stops the
 send, records the conflict with the files involved, and blocks further writes
@@ -247,8 +280,8 @@ A process that writes the data checkout directly — a script, an editor, an
 agent not using the CLI — is not held back and is responsible for not doing so
 while a publish runs; such a write can end up in a publish nobody reviewed.
 There is no second content check to catch it: a check-and-hope comparison would
-promise more than it can keep. Generated output belongs to its materializer,
-which runs inside publish.
+promise more than it can keep. Derived output is an ignored cache, not a draft
+write, so its materializer is not a writer here.
 
 ### CLI parity
 
@@ -257,8 +290,9 @@ repository-db review  [--json]              # prints the draft revision and head
 repository-db discard (--record <path> | --draft) [--revision <draft-revision>]
 repository-db origin  --path <p>... --kind app|agent --actor <actor>
 repository-db publish --revision <draft-revision> --actor "…" --source "…"
-repository-db finish-send --head <sha>
+repository-db finish-send --head <sha>      # also retries a recorded conflict
 repository-db sync --pull                   # fast-forward only
+repository-db generate [--force]            # build derived output when stale
 ```
 
 Publish requires the revision and finish-send the head; both are refused before
@@ -272,13 +306,17 @@ omitted revision means "the draft as it stands right now".
 | `GET /api/<app>/draft/status` | card state, counts, draft revision |
 | `GET /api/<app>/draft/review` | resources, field diffs, origins, revision |
 | `POST /api/<app>/draft/discard` | `{ scope, expectedRevision }` |
-| `POST /api/<app>/draft/publish` | `{ expectedRevision }`, or `{ finishSend: true, expectedHead }` to finish a send |
+| `POST /api/<app>/draft/publish` | `{ expectedRevision }`, or `{ finishSend: true, expectedHead }` to finish (or retry) a send |
 | record writes | carry the `baseRevision` of the version edited; a stale one is refused with the current revision |
 | `GET /api/<app>/draft/events` | SSE: draft changed, conflict, remote pulled |
 
 A stale revision returns a conflict response carrying the current one, so the
-panel can refresh and let the user decide again. Publish and pull stay explicit
-and fail-closed; no browser-owned automatic loop exists.
+panel can refresh and let the user decide again. Every route that changes the
+checkout goes through the sync host's `run()`; `events` forwards its
+`subscribe()` events. Publish stays explicit and fail-closed. Pulling is the
+sync host's job: it fetches in the background and fast-forwards whenever the
+engine allows it — also under a draft of other records — so nobody has to
+remember to click; no browser-owned loop exists.
 
 ## UI standard
 
@@ -318,7 +356,6 @@ disclosure. Inline marks in list and detail screens use the same resource ids.
 - per-author drafts or per-author attribution of individual changes;
 - reverting a single field (an ordinary write of the baseline value instead);
 - reverting a record spanning several files, or one involved in a rename;
-- reverting a record while generated data is in the draft;
 - reviewed-state persistence and approval workflows;
 - collaboration across machines or offline, automatic field merge, shared
   cursors or CRDTs — a stale save is refused and the person decides;

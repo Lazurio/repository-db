@@ -7,8 +7,8 @@
 Repository DB owns Git/YAML status, conflict detection and publish gating. Host
 applications can add domain interpretation through a Review Surface adapter, but
 the shared contract stays application-agnostic: Repository DB talks about
-resources, changes, structural fields, route targets, reviewed state and publish
-readiness, not about any one business schema.
+resources, changes, structural fields, route targets and publish readiness, not
+about any one business schema.
 
 This first slice defines only TypeScript contracts and guidance. It does not add
 an adapter registry, UI, persistence or publish behavior change.
@@ -17,10 +17,11 @@ an adapter registry, UI, persistence or publish behavior change.
 
 - `ReviewableResource` is the user-facing unit shown in draft/review UI.
   It has a stable resource id, a required human-readable `label`, an optional
-  host-app `routeTarget`, one or more `ResourceChange` rows, a `reviewState`, a
-  fallback ladder and optional publish-readiness references.
+  host-app `routeTarget`, one or more `ResourceChange` rows, a fallback ladder
+  and optional publish-readiness references.
 - `ResourceChange` is the technical/source change attached to a resource. It
-  covers `created`, `modified`, `deleted`, `generated` and `unknown` changes.
+  covers `created`, `modified`, `deleted` and `unknown` changes. Derived output
+  (`generated_manifest`) is an ignored cache and never part of a review.
 - `ReviewFieldSummary` is the structural field summary used by review lists and
   inline highlights. It uses parsed-record paths such as `details.status`, not
   filesystem paths. It may include app-agnostic `valueKind` and `renderHint`
@@ -60,7 +61,6 @@ const resource = {
   },
   reviewRepresentationHash: "sha256:resource-review-fixture",
   changes: [],
-  reviewState: { value: "unreviewed" },
   fallback: { activeLevel: "resource_adapter", steps: [] },
 };
 ```
@@ -119,9 +119,8 @@ technical diff; they must not disappear just because no adapter exists.
 The adapter input is `ReviewInputChange`, not a fully rendered
 `ResourceChange`. A raw input change is still technical: it references
 repo-relative paths and coarse change status before any app labels, route targets
-or field summaries exist. Renames can carry `previousTechnicalRefs`; generated
-changes can carry `generatedFrom`; metadata must be JSON-serializable and
-non-secret.
+or field summaries exist. Renames can carry `previousTechnicalRefs`; metadata
+must be JSON-serializable and non-secret.
 
 A computed `ReviewSurfaceSnapshot` is the stable top-level handoff object for a
 review panel or publish summary:
@@ -141,8 +140,8 @@ const snapshot = {
 };
 ```
 
-This is advisory contract shape only in this slice. It does not wire review
-readiness into `publish()`, persist reviewed marks, or register adapters.
+This is advisory contract shape. It does not wire review readiness into
+`publish()` or register adapters; the engine keeps no reviewed marks.
 
 ## Fallback ladder
 
@@ -159,28 +158,14 @@ readiness into `publish()`, persist reviewed marks, or register adapters.
 Review surfaces should render the active level and keep the ladder available for
 diagnostics. A missing adapter is a degraded review state, not a hidden change.
 
-## Reviewed-state invalidation key
+## Representation identity
 
 `ReviewSurfaceContractMetadata` travels with a rendered resource so review
 consumers know which contract, adapter and schema versions produced the visible
-representation. `ReviewedStateKey` is designed for local repository-db metadata.
-Persisted review marks should include:
-
-- `baselineHead` — HEAD used when the draft representation was computed;
-- `stableResourceId` — the app/resource id, not a path;
-- `resourcePaths` — technical paths only for move/rename invalidation;
-- `draftContentHash` — hash of the review representation or backing draft data;
-- `reviewContractVersion` — usually `REVIEW_SURFACE_CONTRACT_VERSION`;
-- `adapterVersion` and `schemaVersion` when provided by the host adapter;
-- `dataSchemaVersion` when the app needs to disambiguate data/schema contract
-  identity from repository-db config or commit trailer schema names.
-
-If any of those values changes, an old `reviewed` mark can become stale and
-should not satisfy a required review gate. The same version identity should be
-visible in `contractMetadata` when a resource is handed to a panel, adapter test
-or publish-readiness summary. A resource or snapshot `reviewRepresentationHash`
-should be derived from stable resource ids, field summaries, technical refs, the
-fallback level, baseline head, and review/adapter/schema versions.
+representation. A resource or snapshot `reviewRepresentationHash` should be
+derived from stable resource ids, field summaries, technical refs, the fallback
+level, baseline head, and review/adapter/schema versions. The engine keeps no
+reviewed-state marks: what a publish confirms is the draft revision.
 
 ## Adapter/schema version policy
 
@@ -188,13 +173,11 @@ Adapter and schema versions are semantic review-representation versions, not
 build counters.
 
 Bump `adapterVersion` or `schemaVersion` when a change can make an existing
-review mark misleading, for example:
+review representation misleading, for example:
 
 - a field id or field meaning changes;
 - a route target now opens a different review context;
 - diff normalization changes before/after summaries materially;
-- UI anchor semantics change enough that an inline highlight would point at the
-  wrong control;
 - `REVIEW_SURFACE_CONTRACT_VERSION` changes incompatibly.
 
 Do not bump only for non-invalidating changes, for example:
@@ -209,14 +192,13 @@ Do not bump only for non-invalidating changes, for example:
 `PublishReadinessReference` lets the final publish summary point to blocking and
 non-blocking evidence. `PublishReadinessSummary` aggregates those references into
 `ready`, `blocked`, `warning` or `unknown` plus a convenience `canPublish` flag.
-This is advisory contract data in this slice; actual `publish()` gating remains
-unchanged until a later implementation task. The generic kinds cover:
+This is advisory data for the card: `publish()` itself gates on the confirmed
+revision, the Git identity, derived output and the validators. The generic kinds
+cover:
 
 - `schema_error` — parsed data failed a schema/adapter validation;
 - `conflict` — repository conflict state blocks writes or publish;
-- `unreviewed_change` — a required review mark is missing or stale;
-- `validation_error` — a configured validation command failed;
-- `generated_policy` — generated output policy needs attention;
+- `validation_error` — an app rule (or a configured validation command) blocks;
 - `unknown` — a visible issue has no richer classification yet.
 
 References can point at `changeIds`, `stableResourceIds` and `technicalRefs` so a

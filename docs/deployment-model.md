@@ -11,7 +11,8 @@ Three layers with strict responsibilities:
 
 1. **Engine** (`@lazurio/repository-db`, public): Git-backed YAML mechanics —
    config contract, boundary guard, collections CRUD, sync status, publish
-   and conflict lifecycle, generated manifest policy, credential preflight. The
+   and conflict lifecycle, derived output cache, host sync service, credential
+   preflight. The
    engine must never contain business schemas, business data or secrets.
 2. **Schema package** (per app, e.g. `@spectoda/deals-data-schema`): the
    versioned typed data-shape contract (Zod). It starts as a package-shaped
@@ -30,9 +31,10 @@ Three layers with strict responsibilities:
 <app>-data/                  # private Git repo, e.g. Spectoda/deals-data
   repository-db.yaml         # config contract (expected remote, branch, schema, manifest)
   data/                      # canonical YAML collections (source of truth)
-  generated/                 # committed deterministic read models (declared in manifest)
-  scripts/                   # repo-local materializers/validators (run with cwd = repo root)
-  .repository-db/            # ignored engine layer: lock, conflict state, caches
+  generated/                 # ignored derived output (declared in generated_manifest), rebuilt by the engine
+  scripts/                   # repo-local materializers/validators (cwd = repo root, never reach outside it)
+  .gitignore                 # ignores /.repository-db/ and every derived path
+  .repository-db/            # ignored engine layer: lock, conflict state, derived-output stamp
 ```
 
 ## Major generation = Git branch
@@ -90,10 +92,20 @@ A client deployment separates the shared app from client-owned data:
 - Remote changes are detected via `git fetch` (`status --fetch`); an inbound
   webhook is only an optional faster signal for hosts that can accept one.
 - Publish is one explicit action producing one audited commit per batch:
-  `validate → materialize generated → commit with Repository-Db-* trailers →
-  send`, all inside the shared lock. Sending integrates a moved remote in a
-  temporary worktree, never in the checkout. A conflict there is recorded and
-  blocks all writes until an explicit `conflict --resolved` / `conflict --abort`.
+  `identity → build derived output → validate (live checkout) → commit the
+  tracked draft with Repository-Db-* trailers → send`, all inside the shared
+  lock. Sending replays onto a moved remote in a temporary worktree (Git only),
+  moves the live checkout to the result, builds and validates there and only
+  then pushes. A conflict — the merge could not be proven safe, or the
+  integrated result failed validation — leaves the local commit in place, is
+  recorded and blocks all writes until `finish-send` retries it,
+  `conflict --abort` returns it to the draft, or `conflict --resolved`.
+- A host app runs `createSyncHost()`: one serialized queue for every write,
+  publish, pull and discard, a background fetch with fast-forward whenever the
+  engine allows it (also under a draft of other records), status and events for
+  the card, and recovery when the data checkout appears after the app started.
+- Derived output is a local cache: it is never pushed, so another module or a
+  dashboard never reads it from Git; it reads `data/` or the owner's API.
 
 ## Commit contract
 
