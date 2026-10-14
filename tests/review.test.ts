@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { resolveDraftOrigins } from "../src/origin.ts";
 import { globToRegExp } from "../src/review.ts";
@@ -461,4 +461,45 @@ describe("adapters get the draft content from the engine", () => {
 			rmSync(fixture.root, { recursive: true, force: true });
 		}
 	});
+});
+
+describe("a symlinked directory component is never followed", () => {
+	for (const where of ["inside", "outside"] as const) {
+		test(`a directory link pointing ${where} the checkout: draftText stays undefined, nothing behind it is shown`, async () => {
+			const fixture = createFixtureRepo();
+			try {
+				writeFixtureDocument(fixture.mountPath, "alpha", { name: "Alfa" });
+				git(fixture.mountPath, ["add", "--all"]);
+				git(fixture.mountPath, ["commit", "--message", "seed"]);
+				git(fixture.mountPath, ["push", "--quiet", "origin", fixture.branch]);
+
+				const things = path.join(fixture.mountPath, "data/things");
+				const target =
+					where === "inside"
+						? path.join(fixture.mountPath, ".repository-db/private")
+						: path.join(fixture.root, "outside-things");
+				mkdirSync(path.dirname(target), { recursive: true });
+				renameSync(things, target);
+				writeFileSync(path.join(target, "alpha.yaml"), "schemaVersion: t.v1\nid: alpha\nrecord:\n  name: LINKED-SENTINEL\n", "utf8");
+				symlinkSync(target, things);
+
+				const seen = new Map<string, string | undefined>();
+				const capturing: ReviewSurfaceAdapter = {
+					...thingAdapter,
+					toReviewableResources(changes) {
+						for (const change of changes) seen.set(change.technicalRefs[0]?.path ?? "", change.draftText);
+						return thingAdapter.toReviewableResources(changes);
+					},
+				};
+				const snapshot = await RepositoryDb.open(fixture.mountPath).review({
+					adapters: [capturing],
+					includeInputChanges: true,
+				});
+				expect(seen.get("data/things/alpha.yaml")).toBeUndefined();
+				expect(JSON.stringify(snapshot)).not.toContain("LINKED-SENTINEL");
+			} finally {
+				rmSync(fixture.root, { recursive: true, force: true });
+			}
+		});
+	}
 });

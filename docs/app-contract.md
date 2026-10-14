@@ -53,7 +53,7 @@ standard for the card is [`draft-publish-standard.md`](draft-publish-standard.md
   only holds back engine-routed writers).
 - Read draft or baseline files from the filesystem in a review adapter. The
   adapter gets `draftText` (exactly what Git would publish: a symlink is its
-  target path, a path outside the checkout is undefined) and `baselineText`
+  target path, a path under a symlinked directory is undefined) and `baselineText`
   from the engine. Reading the file itself would follow a symlink and could put
   a host file into the review payload.
 - Invent an actor or a Git identity. Pass `actor` when the app knows the signed-in

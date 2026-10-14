@@ -5,8 +5,8 @@
 - **Review adapters get the draft content from the engine.** `ReviewInputChange`
   carries `draftText`: the draft exactly as Git would publish it — the file's
   text, or a symlink's target path, never the linked file — and undefined when
-  the path is gone, unreadable, or its directory resolves outside the data
-  checkout. Adapters read `draftText`/`baselineText` and never the filesystem
+  the path is gone, unreadable, or any of its directories is a symlink
+  (wherever it points). Adapters read `draftText`/`baselineText` and never the filesystem
   (docs/app-contract.md); an adapter that followed a symlink could put a host
   file into the review payload.
 

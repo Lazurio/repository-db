@@ -246,7 +246,7 @@ export interface ReviewInputChange {
 	/**
 	 * Draft content exactly as Git would publish it: the file's text, or a
 	 * symlink's target path (never the linked file). Undefined when the path is
-	 * gone, binary/unreadable, or reaches outside the data checkout. Adapters
+	 * gone, binary/unreadable, or has a symlinked directory component. Adapters
 	 * read the draft from here and never from the filesystem.
 	 */
 	draftText?: string;
