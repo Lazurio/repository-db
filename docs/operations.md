@@ -46,6 +46,7 @@ was pushed, and writes are blocked.
 
 ```bash
 repository-db conflict              # paths and unresolved fields
+repository-db conflict --json       # also pendingHead, the commit waiting to be sent
 ```
 
 Then take one of two ways out:
@@ -53,7 +54,7 @@ Then take one of two ways out:
 - **The colleague's side converges** (they agree and change the record):
 
   ```bash
-  repository-db finish-send --head <pendingHead from `conflict`>
+  repository-db finish-send --head <pendingHead from `conflict --json`>
   ```
 
 - **Redo your edit on top of theirs** (keeps every other record you drafted):
@@ -81,10 +82,20 @@ repository-db validate              # reproduce locally (builds derived output f
 The ways out:
 
 - **The colleague fixes their record or the rule:**
-  `repository-db finish-send --head <pendingHead>`.
-- **Your record has to change:** `repository-db conflict --abort`, then fix the record,
-  `repository-db sync --pull`, `repository-db review`, and `repository-db publish --revision <revision>
-  --source <app>`.
+  `repository-db finish-send --head <pendingHead>` (read it with
+  `repository-db conflict --json`).
+- **Your record has to change:** the same sequence as for a merge conflict, so
+  every other drafted record is kept. Fixing the record before the pull would
+  leave it drafted, and the pull refuses an overlap (`pull_blocked_by_draft`):
+
+  ```bash
+  repository-db conflict --abort                       # your commit becomes a draft again
+  repository-db discard --record data/<path of the failing record>
+  repository-db sync --pull                            # the colleague's work comes in
+  # make the corrected edit again (in the app), then:
+  repository-db review                                 # note the revision
+  repository-db publish --revision <revision> --source <app>
+  ```
 - **A command changed tracked files:** fix the command in the data repo. It may
   write only to `generated_manifest` paths.
 

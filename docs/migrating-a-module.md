@@ -30,7 +30,11 @@ In the module and its data repo, write down:
 - **Data-repo commands.** Every materializer and validator. They must run from
   the data checkout and never reach outside it. Watch for `../`, imports from the
   app, and dependencies that are only installed in the app. Move what they need
-  into the data repo, or move the rule into the app.
+  into the data repo: the engine runs only the data repo's commands, on the live
+  and on the integrated checkout, so a blocking data rule must stay
+  self-contained there. Only a genuinely app-local, non-blocking UI hint may
+  live in the app; a data rule moved into the app lets a concurrent send publish
+  a combined result that breaks it.
 - **The app's own sync code.** Every `git` call on the data checkout; an
   integration lane or worktree; a write queue; a remote monitor or poll loop; a
   conflict file of its own; its own card state. All of it is deleted in step 3.
