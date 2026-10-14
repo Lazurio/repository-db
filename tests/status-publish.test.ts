@@ -60,7 +60,7 @@ describe("publish flow", () => {
 			writeFixtureDocument(fixture.mountPath, "thing-2", { name: "second" });
 
 			const result = await db.publish({ expectedRevision: db.draftRevision(),
-				actor: "Test Actor <test@spectoda.com>",
+				actor: "Test Actor <test@example.com>",
 				source: "repository-db-test",
 				entities: ["thing-1", "thing-2"],
 			});
@@ -79,7 +79,7 @@ describe("publish flow", () => {
 			const parsed = parseCommitMessage(message);
 			expect(parsed.trailers.app).toBe("fixture");
 			expect(parsed.trailers.branch).toBe(fixture.branch);
-			expect(parsed.trailers.actor).toBe("Test Actor <test@spectoda.com>");
+			expect(parsed.trailers.actor).toBe("Test Actor <test@example.com>");
 			expect(parsed.trailers.source).toBe("repository-db-test");
 			expect(parsed.trailers.entities).toEqual(["thing-1", "thing-2"]);
 			expect(parsed.subject).toContain("2 data file(s)");
@@ -108,7 +108,7 @@ describe("publish flow", () => {
 			const db = RepositoryDb.open(fixture.mountPath);
 			writeFixtureDocument(fixture.mountPath, "thing-local", { name: "local" });
 			const result = await db.publish({ expectedRevision: db.draftRevision(),
-				actor: "Test Actor <test@spectoda.com>",
+				actor: "Test Actor <test@example.com>",
 				source: "repository-db-test",
 			});
 			expect(result.state).toBe("published");
@@ -169,7 +169,7 @@ describe("publish flow", () => {
 
 			const result = await db.publish({
 				expectedRevision: db.draftRevision(),
-				actor: "Test Actor <test@spectoda.com>",
+				actor: "Test Actor <test@example.com>",
 				source: "repository-db-test",
 			});
 
@@ -235,7 +235,7 @@ describe("publish flow", () => {
 			writeFixtureDocument(fixture.mountPath, "thing-1", base);
 			await db.publish({
 				expectedRevision: db.draftRevision(),
-				actor: "Test Actor <test@spectoda.com>",
+				actor: "Test Actor <test@example.com>",
 				source: "repository-db-test",
 			});
 
@@ -258,7 +258,7 @@ describe("publish flow", () => {
 			});
 			const result = await db.publish({
 				expectedRevision: db.draftRevision(),
-				actor: "Test Actor <test@spectoda.com>",
+				actor: "Test Actor <test@example.com>",
 				source: "repository-db-test",
 			});
 			expect(result.state).toBe("published");

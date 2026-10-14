@@ -2,8 +2,8 @@
 
 This document describes how applications use repository-db data repositories
 across major data generations and deployments. The engine is generic — the
-examples reference the Deals pilot (DEV-6353), but nothing here is
-Deals-specific.
+examples use a deals module, but nothing here is deals-specific. The sync model
+itself is in [`architecture.md`](architecture.md).
 
 ## Layer boundaries
 
@@ -14,7 +14,7 @@ Three layers with strict responsibilities:
    and conflict lifecycle, derived output cache, host sync service, credential
    preflight. The
    engine must never contain business schemas, business data or secrets.
-2. **Schema package** (per app, e.g. `@spectoda/deals-data-schema`): the
+2. **Schema package** (per app, e.g. `@example-org/deals-data-schema`): the
    versioned typed data-shape contract (Zod). It starts as a package-shaped
    module inside the app (`app/v3/packages/deals-data-schema`) for fast
    iteration; extracting and publishing it is a **mandatory gate before any
@@ -28,7 +28,7 @@ Three layers with strict responsibilities:
 ## Data repo anatomy
 
 ```
-<app>-data/                  # private Git repo, e.g. Spectoda/deals-data
+<app>-data/                  # private Git repo, e.g. example-org/deals-data
   repository-db.yaml         # config contract (expected remote, branch, schema, manifest)
   data/                      # canonical YAML collections (source of truth)
   generated/                 # ignored derived output (declared in generated_manifest), rebuilt by the engine
@@ -88,24 +88,11 @@ A client deployment separates the shared app from client-owned data:
 
 ## Sync and publish
 
-- Drafts are working-tree changes; nothing commits on keypress.
-- Remote changes are detected via `git fetch` (`status --fetch`); an inbound
-  webhook is only an optional faster signal for hosts that can accept one.
-- Publish is one explicit action producing one audited commit per batch:
-  `identity → build derived output → validate (live checkout) → commit the
-  tracked draft with Repository-Db-* trailers → send`, all inside the shared
-  lock. Sending replays onto a moved remote in a temporary worktree (Git only),
-  moves the live checkout to the result, builds and validates there and only
-  then pushes. A conflict — the merge could not be proven safe, or the
-  integrated result failed validation — leaves the local commit in place, is
-  recorded and blocks all writes until `finish-send` retries it,
-  `conflict --abort` returns it to the draft, or `conflict --resolved`.
-- A host app runs `createSyncHost()`: one serialized queue for every write,
-  publish, pull and discard, a background fetch with fast-forward whenever the
-  engine allows it (also under a draft of other records), status and events for
-  the card, and recovery when the data checkout appears after the app started.
-- Derived output is a local cache: it is never pushed, so another module or a
-  dashboard never reads it from Git; it reads `data/` or the owner's API.
+Drafts, publish, send, pull, conflicts, derived output and the sync host are
+described in [`architecture.md`](architecture.md); what an app must do around
+them is in [`app-contract.md`](app-contract.md). Remote changes are detected by
+`git fetch` (the sync host fetches in the background); an inbound webhook is
+only an optional faster signal for hosts that can accept one.
 
 ## Commit contract
 

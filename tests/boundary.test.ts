@@ -9,11 +9,11 @@ import { createFixtureRepo, fixtureConfigValue, git } from "./fixtures.ts";
 
 describe("git boundary guard", () => {
 	test("normalizes ssh and https remote spellings to the same identity", () => {
-		expect(normalizeRemoteUrl("git@github.com:Spectoda/deals-data.git")).toBe(
-			normalizeRemoteUrl("https://github.com/Spectoda/deals-data"),
+		expect(normalizeRemoteUrl("git@github.com:example-org/deals-data.git")).toBe(
+			normalizeRemoteUrl("https://github.com/example-org/deals-data"),
 		);
-		expect(normalizeRemoteUrl("ssh://git@github.com/Spectoda/deals-data.git")).toBe(
-			normalizeRemoteUrl("https://github.com/Spectoda/Deals-Data.git"),
+		expect(normalizeRemoteUrl("ssh://git@github.com/example-org/deals-data.git")).toBe(
+			normalizeRemoteUrl("https://github.com/example-org/Deals-Data.git"),
 		);
 		expect(normalizeRemoteUrl("/tmp/origin.git")).toBe("/tmp/origin.git");
 		expect(normalizeRemoteUrl("/tmp/Origin.git")).not.toBe("/tmp/origin.git");
@@ -64,7 +64,7 @@ describe("git boundary guard", () => {
 		const fixture = createFixtureRepo();
 		try {
 			const config = parseRepositoryDbConfig(
-				fixtureConfigValue("git@github.com:Spectoda/other-data.git", fixture.branch),
+				fixtureConfigValue("git@github.com:example-org/other-data.git", fixture.branch),
 			);
 			expect(() => assertDataRepoBoundary(fixture.mountPath, config)).toThrow(
 				/origin remote mismatch/,

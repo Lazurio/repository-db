@@ -14,7 +14,7 @@ import {
 export interface InitOptions {
 	/** Application name; the data repo conventionally is `<app>-data`. */
 	app: string;
-	/** Remote URL of the data repo, e.g. git@github.com:Spectoda/deals-data.git */
+	/** Remote URL of the data repo, e.g. git@github.com:example-org/deals-data.git */
 	remote: string;
 	/** Major-generation branch, e.g. `v3`. */
 	branch: string;

@@ -10,10 +10,10 @@ obsahu.
   lifecycle, odvozená data jako ignorovaná mezipaměť, hostitelskou službu
   synchronizace (`createSyncHost`), model karty (`deriveDraftPanel`) a
   credential preflight.
-- Sem nikdy nepatří Spectoda business data, doménová schémata (Deals, Products,
+- Sem nikdy nepatří business data žádné Organizace, doménová schémata (Deals, Products,
   …), secrets, tokeny, interní URL ani zákaznické hodnoty. Doménové schéma
   žije v owner modulu aplikace (pilot: `modules/deals/app/v3`), později jako
-  samostatný schema package (`@spectoda/deals-data-schema`).
+  samostatný schema package (`@example-org/deals-data-schema`).
 - Testy používají výhradně syntetické fixture repo v temp adresáři; žádná
   reálná data.
 
@@ -46,6 +46,19 @@ obsahu.
   `conflict --resolved` / `conflict --abort`.
 - Credential preflight nikdy nezapisuje credentials; jen ověřuje externí
   mechanismus (gh, ssh-agent, credential helper) před mutací working tree.
+
+## Dokumentace
+
+Než měníš chování, přečti `docs/architecture.md` (model a invarianty) a
+`docs/app-contract.md` (co smí a nesmí aplikace). Převod Modulu popisuje
+`docs/migrating-a-module.md`, obnovu podle chybových kódů
+`docs/operations.md`. Změna chování mění i tyto dokumenty ve stejném PR.
+
+## Veřejné repo
+
+Repo je veřejné: v kódu, testech, dokumentaci, commitech ani PR nejmenuj
+Organizace, lidi, persony ani obchodní data. Příklady používej neutrální
+(`example-org/deals-data`, `jana@example.com`).
 
 ## Vývoj
 

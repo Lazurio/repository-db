@@ -9,10 +9,10 @@ import type { CommitTrailers } from "../src/types.ts";
 function sampleTrailers(overrides: Partial<CommitTrailers> = {}): CommitTrailers {
 	return {
 		app: "deals",
-		dataRepo: "git@github.com:Spectoda/deals-data.git",
+		dataRepo: "git@github.com:example-org/deals-data.git",
 		branch: "v3",
 		schemaVersion: "deals-data@3.0.0-alpha.0",
-		actor: "Jana Novak <jana@spectoda.com>",
+		actor: "Jana Novak <jana@example.com>",
 		machine: "test-machine",
 		source: "deals-app-v3",
 		changeId: newChangeId(),

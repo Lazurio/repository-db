@@ -253,7 +253,7 @@ describe("credential preflight", () => {
 			writeFileSync(
 				configPath,
 				toStableYaml(
-					fixtureConfigValue("https://github.com/Spectoda/fixture-data.git", fixture.branch),
+					fixtureConfigValue("https://github.com/example-org/fixture-data.git", fixture.branch),
 				),
 				"utf8",
 			);
@@ -261,7 +261,7 @@ describe("credential preflight", () => {
 				"remote",
 				"set-url",
 				"origin",
-				"https://github.com/Spectoda/fixture-data.git",
+				"https://github.com/example-org/fixture-data.git",
 			]);
 			git(fixture.mountPath, ["add", "--all"]);
 			git(fixture.mountPath, ["commit", "--message", "retarget remote"]);

@@ -1,6 +1,14 @@
 # Changelog
 
-## Unreleased
+## 3.2.0 — 2026-10-14
+
+**Upgrade note.** 3.2 is the one sync path: derived output becomes an ignored
+cache, every app synchronises through `createSyncHost`, and an app runs no Git
+on its data. A data repo that still tracks derived output is refused until its
+one-time migration. Convert each module with
+[`docs/migrating-a-module.md`](docs/migrating-a-module.md): the preflight on
+every Environment, a data-repo PR and an app PR, released in one window. The
+breaking changes are listed below.
 
 - **Sync host gaps found by the first consumer.**
   - `host.read(fn)` runs a read without the mutation queue and drops the
@@ -142,6 +150,8 @@
   engine-recorded send. The shared panel counts actual conflict paths separately
   from records held in the waiting publish.
 
+## 3.1.0 — 2026-09-19
+
 - Review hides nothing unsent: without an upstream it compares against the empty
   tree; committed-but-unsent changes keep their recorded origin; an undeclared
   generated file in an unsent commit blocks publish readiness. The draft
@@ -195,7 +205,7 @@
   check and the write run under the shared gate; a stale save fails with
   `RecordChangedError` (`record_changed`) carrying the current revision.
   `put` now returns the new revision.
-- Consumers pinned to earlier commits (Warehouse, General, Lumbio apps) keep
+- Consumers pinned to earlier commits keep
   working until they bump; a bump needs the revision on `publish` and
   `finishSend` for push recovery. The low-level `abortConflict(mountRoot,
   branch)` helper refuses without the branch instead of clearing a conflict
@@ -350,6 +360,8 @@
   origin hints, the discard ladder, the host API convention and agent
   obligations. The existing card and review-surface documents stay as its
   detailed type references.
+
+## 3.0.0 — 2026-08-29
 
 - Move the public repository to `Lazurio/repository-db` and rename the package
   to `@lazurio/repository-db`; generated data-repo READMEs now point to the new
