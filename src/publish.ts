@@ -8,6 +8,7 @@ import {
 	clearRecordedConflictState,
 	writeConflictState,
 } from "./conflict.ts";
+import { CONFIG_FILE_NAME, compatibleConfig, liveConfig } from "./config.ts";
 import { assertCredentials } from "./credentials.ts";
 import { DraftChangedError } from "./discard.ts";
 import { computeDraftRevision } from "./draftRevision.ts";
@@ -449,9 +450,19 @@ async function send(
 				// --keep, not --hard: if anything unexpected sits in the working tree,
 				// Git refuses instead of erasing it.
 				runGitOrThrow(mountRoot, ["reset", "--keep", lane.head]);
+				// The integrated result is validated by the rules it now holds — a
+				// colleague may have published stricter ones — never by the config
+				// parsed when the checkout was opened. A changed boundary fails closed.
+				let integrated: RepositoryDbConfig;
+				try {
+					integrated = liveConfig(mountRoot, config);
+				} catch (error) {
+					runGitOrThrow(mountRoot, ["reset", "--keep", pending]);
+					throw error;
+				}
 				let failure: string | undefined;
 				try {
-					await verifyLiveCheckout(mountRoot, config);
+					await verifyLiveCheckout(mountRoot, integrated);
 				} catch (error) {
 					if (!(error instanceof MaterializeFailedError || error instanceof ValidationFailedError)) {
 						restoreCommandSideEffects(mountRoot, dirtyBefore);
@@ -541,6 +552,8 @@ export async function publish(
 		if (currentRevision !== options.expectedRevision) {
 			throw new DraftChangedError(currentRevision);
 		}
+		// The rules in the checkout now, not the ones read when it was opened.
+		const current = liveConfig(mountRoot, config);
 		const dirtyPaths = engineDirFree(gitDirtyPaths(mountRoot));
 		if (dirtyPaths.length === 0) {
 			if (gitAheadBehind(mountRoot, config.dataRepo.branch).ahead > 0) {
@@ -564,7 +577,7 @@ export async function publish(
 			return appeared;
 		};
 		try {
-			await verifyLiveCheckout(mountRoot, config);
+			await verifyLiveCheckout(mountRoot, current);
 		} catch (error) {
 			if (computeDraftRevision(mountRoot) !== options.expectedRevision) undoCommands();
 			throw error;
@@ -756,6 +769,12 @@ export async function pullRemote(
 		]);
 		const overlap = remoteChanges.filter((entry) => drafted.has(entry));
 		if (overlap.length > 0) throw new PullBlockedError(overlap);
+		// The configuration that would arrive: refused before anything moves when
+		// it cannot be read or changes the boundary this checkout was opened with.
+		if (remoteChanges.includes(CONFIG_FILE_NAME)) {
+			const incoming = runGit(mountRoot, ["show", `${remoteRef}:${CONFIG_FILE_NAME}`]);
+			compatibleConfig(config, incoming.status === 0 ? incoming.stdout : undefined, "published by a colleague");
+		}
 		const merge = runGit(mountRoot, ["merge", "--ff-only", remoteRef]);
 		if (merge.status !== 0) {
 			throw new PullBlockedError(

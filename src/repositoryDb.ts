@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { assertDataRepoBoundary } from "./boundary.ts";
 import { Collection, type CollectionOptions } from "./collections.ts";
@@ -6,7 +7,7 @@ import {
 	activeConflict,
 	markConflictResolved,
 } from "./conflict.ts";
-import { loadRepositoryDbConfig } from "./config.ts";
+import { CONFIG_FILE_NAME, liveConfig, loadRepositoryDbConfig } from "./config.ts";
 import {
 	type DiscardOptions,
 	type DiscardResult,
@@ -59,11 +60,34 @@ import type {
  */
 export class RepositoryDb {
 	readonly mountRoot: string;
-	readonly config: RepositoryDbConfig;
+	#config: RepositoryDbConfig;
+	#configText: string;
 
-	private constructor(mountRoot: string, config: RepositoryDbConfig) {
+	private constructor(mountRoot: string, config: RepositoryDbConfig, configText: string) {
 		this.mountRoot = mountRoot;
-		this.config = config;
+		this.#config = config;
+		this.#configText = configText;
+	}
+
+	/**
+	 * The configuration the checkout holds now. A pull or a send can bring in a
+	 * colleague's change of `repository-db.yaml` (a stricter validator, a new
+	 * derived artifact), so it is re-read whenever the file changed; a change of
+	 * the boundary (remote, branch, data layout) or an unreadable file throws
+	 * `ConfigChangedError`, and the checkout has to be opened again.
+	 */
+	get config(): RepositoryDbConfig {
+		let text: string;
+		try {
+			text = readFileSync(path.join(this.mountRoot, CONFIG_FILE_NAME), "utf8");
+		} catch {
+			text = "";
+		}
+		if (text !== this.#configText) {
+			this.#config = liveConfig(this.mountRoot, this.#config);
+			this.#configText = text;
+		}
+		return this.#config;
 	}
 
 	static open(mountRoot: string): RepositoryDb {
@@ -73,7 +97,7 @@ export class RepositoryDb {
 		// A checkout that still tracks derived output (or engine runtime files)
 		// is refused here, with the exact migration, rather than half-working.
 		assertDerivedOutputIgnored(resolved, config);
-		return new RepositoryDb(resolved, config);
+		return new RepositoryDb(resolved, config, readFileSync(path.join(resolved, CONFIG_FILE_NAME), "utf8"));
 	}
 
 	collection<T>(name: string, options: CollectionOptions<T>): Collection<T> {

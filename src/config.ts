@@ -1,7 +1,9 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
+import { normalizeRemoteUrl } from "./boundary.ts";
 import { parseYaml } from "./yamlIo.ts";
 import {
+	ConfigChangedError,
 	type GeneratedManifestEntry,
 	type RepositoryDbConfig,
 	RepositoryDbError,
@@ -164,4 +166,61 @@ export function configToYamlValue(config: RepositoryDbConfig): Record<string, un
 		})),
 		validate: [...config.validate],
 	};
+}
+
+/**
+ * Config fields that decide what a checkout is. A change of any of them is not
+ * something a running checkout may follow on its own: it needs a new open.
+ */
+export function boundaryChanges(opened: RepositoryDbConfig, next: RepositoryDbConfig): string[] {
+	const changes: string[] = [];
+	if (normalizeRemoteUrl(opened.dataRepo.remote) !== normalizeRemoteUrl(next.dataRepo.remote)) {
+		changes.push("data_repo.remote");
+	}
+	if (opened.dataRepo.branch !== next.dataRepo.branch) changes.push("data_repo.branch");
+	if (opened.layout.data !== next.layout.data) changes.push("layout.data");
+	return changes;
+}
+
+/**
+ * Parse configuration text that arrived from elsewhere (the live checkout after
+ * an integration, or a commit about to be pulled) and hold it to the boundary
+ * of the configuration the checkout was opened with. Throws
+ * {@link ConfigChangedError} when it cannot be read or moves the boundary.
+ */
+export function compatibleConfig(
+	opened: RepositoryDbConfig,
+	text: string | undefined,
+	where: string,
+): RepositoryDbConfig {
+	let next: RepositoryDbConfig;
+	try {
+		if (text === undefined) throw new Error(`${CONFIG_FILE_NAME} is missing`);
+		next = parseRepositoryDbConfig(parseYaml(text));
+	} catch (error) {
+		throw new ConfigChangedError(
+			[CONFIG_FILE_NAME],
+			`The ${CONFIG_FILE_NAME} ${where} cannot be used by this repository-db: ${
+				error instanceof Error ? error.message : String(error)
+			}. Nothing was pushed or pulled.`,
+		);
+	}
+	const changes = boundaryChanges(opened, next);
+	if (changes.length > 0) {
+		throw new ConfigChangedError(
+			changes,
+			`The ${CONFIG_FILE_NAME} ${where} changes ${changes.join(", ")}, which a running data checkout does not follow on its own. Nothing was pushed or pulled; update the app and open the data checkout again.`,
+		);
+	}
+	return next;
+}
+
+/** The configuration the live checkout holds now, held to the opened boundary. */
+export function liveConfig(mountRoot: string, opened: RepositoryDbConfig): RepositoryDbConfig {
+	const configPath = path.join(mountRoot, CONFIG_FILE_NAME);
+	return compatibleConfig(
+		opened,
+		existsSync(configPath) ? readFileSync(configPath, "utf8") : undefined,
+		"in the data checkout",
+	);
 }

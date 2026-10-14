@@ -582,3 +582,19 @@ export class PullBlockedError extends RepositoryDbError {
 		this.paths = paths;
 	}
 }
+
+/**
+ * The configuration in the checkout (or arriving with a pull) changed what this
+ * checkout is: the data remote, the branch or the data layout — or it can no
+ * longer be read. Nothing was pushed or pulled; reopen the data checkout.
+ */
+export class ConfigChangedError extends RepositoryDbError {
+	/** Config fields that changed incompatibly, e.g. `layout.data`. */
+	readonly changes: string[];
+
+	constructor(changes: string[], message: string) {
+		super("config_changed", message);
+		this.name = "ConfigChangedError";
+		this.changes = changes;
+	}
+}

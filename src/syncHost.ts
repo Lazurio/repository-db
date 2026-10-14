@@ -131,11 +131,13 @@ function problemOf(error: unknown): SyncHostProblem {
 	return { code: "unexpected", message: error instanceof Error ? error.message : String(error) };
 }
 
-/** Errors meaning "the checkout is not (or no longer) there": open it again next time. */
+/** Errors meaning "the checkout is not (or no longer) what was opened": open it again next time. */
 function isMountGone(error: unknown): boolean {
 	return (
 		error instanceof RepositoryDbError &&
-		(error.code === "boundary_violation" || error.code === "config_missing")
+		(error.code === "boundary_violation" ||
+			error.code === "config_missing" ||
+			error.code === "config_changed")
 	);
 }
 

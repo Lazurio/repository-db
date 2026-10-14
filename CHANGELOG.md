@@ -24,6 +24,15 @@
     there, and on failure the checkout returns to the local commit with a
     recorded conflict of kind `validation`; nothing is pushed. A push rejected
     because the remote moved again is integrated anew, up to three attempts.
+  - Configuration follows the checkout. `RepositoryDb.config` re-reads
+    `repository-db.yaml` whenever the file changed, so a colleague's stricter
+    validator or new derived artifact applies after a pull; publish validates
+    with the configuration in the checkout, and a send validates the integrated
+    result with the configuration that result holds. A change of the boundary
+    (`data_repo.remote`, `data_repo.branch`, `layout.data`) or an unreadable
+    configuration fails closed with `ConfigChangedError` (`config_changed`):
+    a send returns to the confirmed commit and pushes nothing, a pull is refused
+    before anything moves, and the sync host reopens the checkout.
   - `finishSend` also retries a send the engine stopped with a conflict (it
     replaces `retryConflictSend`). Conflicts carry `kind: "merge" | "validation"`.
   - `pull` fast-forwards under a draft of other records; an overlap throws
