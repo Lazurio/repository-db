@@ -127,4 +127,13 @@ describe("git boundary guard", () => {
 			rmSync(fixture.root, { recursive: true, force: true });
 		}
 	});
+
+	test("refuses a config with an unsupported schema_version", () => {
+		expect(() =>
+			parseRepositoryDbConfig(fixtureConfigValue("/tmp/origin.git", "v3", { schema_version: "repository-db.config.v2" })),
+		).toThrow(/unsupported schema_version "repository-db.config.v2"/);
+		expect(() => parseRepositoryDbConfig(fixtureConfigValue("/tmp/origin.git", "v3", { schema_version: undefined }))).toThrow(
+			/schema_version/,
+		);
+	});
 });

@@ -54,10 +54,15 @@ export const DEFAULT_GIT_NETWORK_TIMEOUT_MS = 60_000;
  * commit, …). Network ops (fetch/pull/push) must use {@link runGitAsync} so a
  * slow or hung remote can never block the single-threaded event loop.
  */
-export function runGit(repoRoot: string, args: string[]): GitResult {
+export function runGit(
+	repoRoot: string,
+	args: string[],
+	options: { input?: string } = {},
+): GitResult {
 	const result = spawnSync("git", ["-C", repoRoot, ...args], {
 		encoding: "utf8",
 		env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+		...(options.input !== undefined ? { input: options.input } : {}),
 	});
 	if (result.error) {
 		throw new RepositoryDbError(

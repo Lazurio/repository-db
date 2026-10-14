@@ -61,8 +61,12 @@ function assertSafeBranch(branch: string): void {
 	}
 }
 
+const DEFAULT_GENERATED_DIR = "generated";
+
 const DATA_REPO_GITIGNORE = `# repository-db local engine layer (lock, conflict state, caches) — never committed
 /${ENGINE_DIR}/
+# Derived output: an ignored cache repository-db rebuilds from data/ on every Environment
+/${DEFAULT_GENERATED_DIR}/
 node_modules/
 .DS_Store
 `;
@@ -75,10 +79,12 @@ Application data repository managed by [@lazurio/repository-db](https://github.c
 - Major data generation = Git branch (current: \`${options.branch}\`). Later
   generations start as clean orphan branches (e.g. \`v4\`), not directories.
 - \`data/\` holds canonical YAML collections (source of truth).
-- \`generated/\` holds committed deterministic read models declared in
-  \`${CONFIG_FILE_NAME}\`; per-machine caches live in the ignored \`.repository-db/\`.
-- \`scripts/\` holds data-repo-local maintenance scripts (materializers,
-  validators) runnable with cwd = repo root.
+- \`generated/\` holds derived output declared in \`generated_manifest\` of
+  \`${CONFIG_FILE_NAME}\`. It is ignored by Git: repository-db rebuilds it from
+  \`data/\` whenever the data changed. Never read it from Git or treat it as a
+  contract between modules; read \`data/\` or the owner's API instead.
+- \`scripts/\` holds data-repo-local materializers and validators. They run
+  with cwd = repo root and must not reach outside this repository.
 - Writes happen as local drafts in the working tree; \`repository-db publish\`
   turns the current batch into one audited commit with Repository-Db-* trailers
   and pushes it.
@@ -101,7 +107,8 @@ export interface InitResult {
  * - With `createRemote`, creates the (default private) GitHub repo first.
  * - Clones the remote into the mount path when the path does not exist yet.
  * - On an empty repository, bootstraps the branch + structure
- *   (`data/`, `generated/`, `scripts/`, `${CONFIG_FILE_NAME}`) and pushes the
+ *   (`data/`, `scripts/`, `${CONFIG_FILE_NAME}`, a `.gitignore` covering the
+ *   engine layer and derived output) and pushes the
  *   initial commit so the generation branch exists on the remote.
  * - On a non-empty repository, verifies the checkout matches the expected
  *   branch and config.
@@ -110,7 +117,7 @@ export async function initDataRepo(options: InitOptions): Promise<InitResult> {
 	const mountPath = path.resolve(options.mountPath);
 	assertSafeRemote(options.remote);
 	assertSafeBranch(options.branch);
-	assertCredentials(options.remote);
+	await assertCredentials(options.remote);
 
 	let created = false;
 	if (options.createRemote) {
@@ -180,7 +187,7 @@ export async function initDataRepo(options: InitOptions): Promise<InitResult> {
 			app: options.app,
 			dataRepo: { remote: options.remote, branch: options.branch },
 			schema: { name: options.schemaName, version: options.schemaVersion },
-			layout: { data: "data", generated: "generated", scripts: "scripts" },
+			layout: { data: "data", generated: DEFAULT_GENERATED_DIR, scripts: "scripts" },
 			generatedManifest: [],
 			validate: [],
 		};
@@ -190,7 +197,7 @@ export async function initDataRepo(options: InitOptions): Promise<InitResult> {
 		);
 		writeFileSync(path.join(mountPath, ".gitignore"), DATA_REPO_GITIGNORE, "utf8");
 		writeFileSync(path.join(mountPath, "README.md"), defaultReadme(options), "utf8");
-		for (const dir of ["data", "generated", "scripts"]) {
+		for (const dir of ["data", "scripts"]) {
 			mkdirSync(path.join(mountPath, dir), { recursive: true });
 			writeFileSync(path.join(mountPath, dir, ".gitkeep"), "", "utf8");
 		}

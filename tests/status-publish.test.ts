@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { RepositoryDb } from "../src/repositoryDb.ts";
 import { parseCommitMessage } from "../src/trailers.ts";
@@ -189,7 +189,7 @@ describe("publish flow", () => {
 		}
 	});
 
-	test("semantic integration rematerializes and validates declared generated output in the lane", async () => {
+	test("after a semantic integration derived output is rebuilt and validated in the live checkout, and never pushed", async () => {
 		const fixture = createFixtureRepo();
 		try {
 			writeFileSync(
@@ -207,6 +207,11 @@ describe("publish flow", () => {
 						],
 					}),
 				),
+				"utf8",
+			);
+			writeFileSync(
+				path.join(fixture.mountPath, ".gitignore"),
+				"/.repository-db/\n/generated/semantic-summary.yaml\n",
 				"utf8",
 			);
 			git(fixture.mountPath, ["add", "--all"]);
@@ -263,9 +268,10 @@ describe("publish flow", () => {
 				"utf8",
 			);
 			expect(generated).toBe(merged);
-			expect(git(fixture.originPath, ["show", `${fixture.branch}:generated/semantic-summary.yaml`])).toBe(
-				merged,
+			expect(git(fixture.originPath, ["ls-tree", "-r", "--name-only", fixture.branch])).not.toContain(
+				"semantic-summary",
 			);
+			expect(db.status().dirtyPaths).toEqual([]);
 		} finally {
 			rmSync(fixture.root, { recursive: true, force: true });
 		}
@@ -353,72 +359,28 @@ describe("publish flow", () => {
 		}
 	});
 
-	test("removes a historically tracked runtime lock and never republishes it", async () => {
+	test("an undeclared file under generated/ is ordinary data; a declared path must be ignored", async () => {
 		const fixture = createFixtureRepo();
 		try {
-			const lockPath = path.join(fixture.mountPath, ".repository-db", "publish.lock");
-			const gitignorePath = path.join(fixture.mountPath, ".gitignore");
-			writeFileSync(gitignorePath, "node_modules/\n", "utf8");
-			mkdirSync(path.dirname(lockPath), { recursive: true });
-			writeFileSync(
-				lockPath,
-				JSON.stringify({ pid: 999_999_999, hostname: "fixture", acquiredAt: "2000-01-01T00:00:00.000Z" }),
-				"utf8",
-			);
-			git(fixture.mountPath, ["add", "--all"]);
-			git(fixture.mountPath, ["commit", "--message", "legacy tracked engine lock"]);
-			git(fixture.mountPath, ["push", "origin", fixture.branch]);
-			rmSync(lockPath);
-
 			const db = RepositoryDb.open(fixture.mountPath);
-			writeFixtureDocument(fixture.mountPath, "thing-1", { name: "first" });
+			writeFileSync(path.join(fixture.mountPath, "generated/snapshot.json"), "{}\n", "utf8");
 			const result = await db.publish({ expectedRevision: db.draftRevision(), actor: "a <a@a>", source: "test" });
-
 			expect(result.state).toBe("published");
-			expect(
-				git(fixture.mountPath, ["status", "--porcelain"])
-					.split("\n")
-					.filter((line) => line && !line.includes(".repository-db/")),
-			).toEqual([]);
-			expect(
-				git(fixture.originPath, [
-					"ls-tree",
-					"-r",
-					"--name-only",
-					fixture.branch,
-					"--",
-					".repository-db/publish.lock",
-				]).trim(),
-			).toBe("");
-			expect(existsSync(lockPath)).toBe(false);
-		} finally {
-			rmSync(fixture.root, { recursive: true, force: true });
-		}
-	});
+			expect(git(fixture.originPath, ["ls-tree", "-r", "--name-only", fixture.branch])).toContain(
+				"generated/snapshot.json",
+			);
 
-	test("refuses undeclared generated diffs and accepts declared ones", async () => {
-		const fixture = createFixtureRepo();
-		try {
-			const db = RepositoryDb.open(fixture.mountPath);
+			// Declaring it derived while it is still tracked is refused with the migration.
+			const configPath = path.join(fixture.mountPath, "repository-db.yaml");
 			writeFileSync(
-				path.join(fixture.mountPath, "generated/rogue.json"),
-				"{}\n",
+				configPath,
+				readFileSync(configPath, "utf8").replace(
+					"generated_manifest: []",
+					"generated_manifest:\n  - path: generated/snapshot.json",
+				),
 				"utf8",
 			);
-			await expect(
-				db.publish({ expectedRevision: db.draftRevision(), actor: "a <a@a>", source: "test" }),
-			).rejects.toThrow(/undeclared generated diffs/);
-
-			// Declare it in the manifest -> publish passes.
-			const configPath = path.join(fixture.mountPath, "repository-db.yaml");
-			const config = readFileSync(configPath, "utf8").replace(
-				"generated_manifest: []",
-				'generated_manifest:\n  - path: generated/rogue.json\n    note: "test artifact"',
-			);
-			writeFileSync(configPath, config, "utf8");
-			const db2 = RepositoryDb.open(fixture.mountPath);
-			const result = await db2.publish({ expectedRevision: db2.draftRevision(), actor: "a <a@a>", source: "test" });
-			expect(result.state).toBe("published");
+			expect(() => RepositoryDb.open(fixture.mountPath)).toThrow(/git rm -r --cached --ignore-unmatch -- generated\/snapshot\.json/);
 		} finally {
 			rmSync(fixture.root, { recursive: true, force: true });
 		}

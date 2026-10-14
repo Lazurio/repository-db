@@ -1,124 +1,69 @@
+/**
+ * Public API of @lazurio/repository-db.
+ *
+ * Kept deliberately small: an app opens a data checkout through the
+ * {@link createSyncHost} service (or the {@link RepositoryDb} facade), writes
+ * records through collections or `writeRecordDraft`, reviews, publishes,
+ * pulls and discards through the facade, and words the card with
+ * {@link deriveDraftPanel}. Git itself is not part of the API: an app never
+ * commits, pushes, rebases or merges its data.
+ */
 export { RepositoryDb } from "./repositoryDb.ts";
+export {
+	createSyncHost,
+	type SyncHost,
+	type SyncHostEvent,
+	type SyncHostOptions,
+	type SyncHostProblem,
+	type SyncHostRecordRef,
+	type SyncHostStatus,
+} from "./syncHost.ts";
 export {
 	Collection,
 	documentFileName,
 	recordRevision,
 	recordRevisionFromBytes,
 	writeRecordDraft,
+	type CollectionDocument,
+	type CollectionOptions,
+	type RecordWriteOptions,
 } from "./collections.ts";
-export type {
-	CollectionDocument,
-	CollectionOptions,
-	RecordWriteOptions,
-} from "./collections.ts";
+export { CONFIG_FILE_NAME } from "./config.ts";
+export { normalizeRemoteUrl } from "./boundary.ts";
+export { ensureGenerated, type EnsureGeneratedResult } from "./generated.ts";
+export type { PullOptions, PullResult } from "./publish.ts";
+export { initDataRepo, type InitOptions, type InitResult } from "./init.ts";
+export { parseCommitMessage, type ParsedCommitMessage } from "./trailers.ts";
+export { ENGINE_DIR } from "./lock.ts";
 export {
-	CONFIG_FILE_NAME,
-	CONFIG_SCHEMA_VERSION,
-	loadRepositoryDbConfig,
-	parseRepositoryDbConfig,
-	configToYamlValue,
-} from "./config.ts";
-export { assertDataRepoBoundary, normalizeRemoteUrl } from "./boundary.ts";
-export { deriveSyncStatus, deriveSyncStatusAsync } from "./status.ts";
-export type { StatusOptions } from "./status.ts";
-export {
-	DRAFT_PUBLISH_CARD_CONTRACT_VERSION,
-	deriveDraftPublishCard,
-} from "./draftPublishCard.ts";
-export type {
-	DraftPublishCardAction,
-	DraftPublishCardActionKind,
-	DraftPublishCardFreshness,
-	DraftPublishCardInput,
-	DraftPublishCardSnapshot,
-	DraftPublishCardTone,
-} from "./draftPublishCard.ts";
-export {
-	runGitAsync,
-	runGitAsyncOrThrow,
-	gitFetchAsync,
-	DEFAULT_GIT_NETWORK_TIMEOUT_MS,
-} from "./git.ts";
-export type { GitResult } from "./git.ts";
-export { finishSend, publish, pullRemote, retryConflictSend } from "./publish.ts";
-export type { PullResult } from "./publish.ts";
-export { initDataRepo } from "./init.ts";
-export type { InitOptions, InitResult } from "./init.ts";
-export {
-	buildCommitMessage,
-	parseCommitMessage,
-	newChangeId,
-	REQUIRED_TRAILER_KEYS,
-	OPTIONAL_TRAILER_KEYS,
-} from "./trailers.ts";
-export type { ParsedCommitMessage } from "./trailers.ts";
-export {
-	activeConflict,
-	readConflictState,
-	abortConflict,
-	markConflictResolved,
-} from "./conflict.ts";
-export { acquirePublishLock, ENGINE_DIR } from "./lock.ts";
-export {
-	assertCredentials,
-	checkCredentials,
-} from "./credentials.ts";
-export type { CredentialCheck } from "./credentials.ts";
-export {
-	isPathDeclared,
-	undeclaredGeneratedDiffs,
-	assertDeclaredGeneratedOnly,
-	materializeGenerated,
-	runValidateCommands,
-} from "./generated.ts";
-export {
-	toStableYaml,
-	toStableJson,
 	parseYaml,
-	readYamlFile,
-	atomicTempPath,
+	toStableJson,
+	toStableYaml,
 	writeFileAtomic,
 	writeYamlFileAtomic,
 } from "./yamlIo.ts";
 export * from "./types.ts";
 export {
-	discardDraft,
-	recordRevertAvailability,
-	recordRevertAvailabilityBatch,
-	type RevertAvailability,
 	DraftChangedError,
 	RevertNotSupportedError,
 	type DiscardOptions,
 	type DiscardResult,
 	type DiscardScope,
+	type RevertAvailability,
 } from "./discard.ts";
+export { computeDraftRevision } from "./draftRevision.ts";
+export type { DraftOriginKind, DraftOwner } from "./origin.ts";
+export { readBaselineFile, reviewBaselineRef, type ReviewOptions } from "./review.ts";
+export { structuralDiff, type StructuralDiffResult } from "./structuralDiff.ts";
 export {
-	computeDraftRevision,
-	parseDraftRevision,
-} from "./draftRevision.ts";
-export {
-	clearDraftOrigins,
-	clearDraftOwner,
-	clearDraftProvenance,
-	readDraftOrigins,
-	readDraftOwner,
-	recordDraftOrigin,
-	resolveDraftOrigins,
-	setDraftOwnerIfAbsent,
-	type DraftOriginKind,
-	type DraftOriginRecord,
-	type DraftOwner,
-} from "./origin.ts";
-export {
-	collectInputChanges,
-	computeReviewSnapshot,
-	globToRegExp,
-	readBaselineFile,
-	reviewBaselineRef,
-	type ReviewOptions,
-} from "./review.ts";
-export {
-	structuralDiff,
-	summarizeValue,
-	type StructuralDiffResult,
-} from "./structuralDiff.ts";
+	deriveDraftPanel,
+	type DraftPanelAction,
+	type DraftPanelCapabilities,
+	type DraftPanelConflict,
+	type DraftPanelFieldRow,
+	type DraftPanelInput,
+	type DraftPanelModel,
+	type DraftPanelRecord,
+	type DraftPanelRecordInput,
+	type DraftPanelTone,
+} from "./draftPanel.ts";

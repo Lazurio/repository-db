@@ -13,12 +13,12 @@ Usage:
                      [--create-remote] [--visibility private|public]
   repository-db status   [--mount <path>] [--fetch] [--json]
   repository-db validate [--mount <path>]
+  repository-db generate [--mount <path>] [--force] [--json]
   repository-db sync     [--mount <path>] [--pull] [--json]
   repository-db publish  [--mount <path>] --revision <draft-revision>
                          --actor <actor> --source <source>
                          [--summary <text>] [--entity <id>]... [--json]
   repository-db finish-send [--mount <path>] --head <sha> [--json]
-  repository-db retry-send  [--mount <path>] --head <sha> [--json]
   repository-db review   [--mount <path>] [--json] [--inputs]
   repository-db discard  [--mount <path>] (--record <p> | --draft)
                          [--revision <draft-revision>] [--json]
@@ -30,15 +30,17 @@ Notes:
   --mount defaults to the current working directory. Every command verifies
   the Git boundary (repo root, origin remote, branch) against repository-db.yaml
   before touching anything; commands refuse to run from a parent code repo.
-  Publish confirms the draft revision printed by review, then validates,
-  materializes generated output, makes one commit with Repository-Db-*
-  trailers and sends it; a remote that moved meanwhile is integrated in a
-  separate worktree, never in the checkout. When the send fails, the commit
-  waits; finish-send pushes exactly that commit (--head, as printed by
-  status/review) and never makes a new one. retry-send confirms that same head
-  again and only retries an engine-recorded conflict through the canonical
-  structural merge guard; it never resolves a Git operation someone left open.
-  sync --pull only fast-forwards.
+  Derived output (generated_manifest) is an ignored cache: generate builds it
+  when stale; materializers and validators run with cwd = the data checkout.
+  Publish confirms the draft revision printed by review, builds derived
+  output and validates in the checkout, makes one commit with Repository-Db-*
+  trailers and sends it; a remote that moved meanwhile is replayed in a
+  separate worktree, and the result is validated again in the checkout before
+  the push. When the send stops (failed push or a recorded conflict), the
+  commit waits; finish-send sends exactly that commit (--head, as printed by
+  status/review), retrying the safe merge, and never makes a new one; it never
+  resolves a Git operation someone left open. sync --pull only fast-forwards,
+  also under a draft of other records.
   Review reports the current draft as reviewable resources and prints its
   revision. Discard returns one record or the whole draft to the published
   state and runs only if the draft still matches that revision; omit
@@ -74,6 +76,7 @@ function parseArgs(argv: string[]): Args {
 			"pull",
 			"draft",
 			"inputs",
+			"force",
 		]);
 		if (boolFlags.has(name)) {
 			flags.set(name, true);
@@ -163,11 +166,21 @@ async function main(argv: string[]): Promise<number> {
 		}
 		case "validate": {
 			const db = RepositoryDb.open(mountPath(args));
-			const ran = db.validate();
+			const ran = await db.validate();
 			console.log(
 				ran.length > 0
 					? `validate OK (${ran.length} command(s)):\n${ran.map((c) => `  - ${c}`).join("\n")}`
 					: "validate OK (no validate commands configured)",
+			);
+			return 0;
+		}
+		case "generate": {
+			const db = RepositoryDb.open(mountPath(args));
+			const result = await db.ensureGenerated({ force: args.flags.get("force") === true });
+			emit(args, result, () =>
+				result.rebuilt
+					? `derived output rebuilt (${result.ran.length} materializer(s))`
+					: "derived output is up to date",
 			);
 			return 0;
 		}
@@ -224,16 +237,6 @@ async function main(argv: string[]): Promise<number> {
 				result.state === "nothing_to_publish"
 					? "nothing to send (the remote already has this commit)"
 					: `sent ${result.commit} -> ${result.pushedTo}`,
-			);
-			return 0;
-		}
-		case "retry-send": {
-			const db = RepositoryDb.open(mountPath(args));
-			const result = await db.retryConflictSend({ expectedHead: requireFlag(args, "head") });
-			emit(args, result, () =>
-				result.state === "nothing_to_publish"
-					? "nothing to send (the remote already has this commit)"
-					: `retried and sent ${result.commit} -> ${result.pushedTo}`,
 			);
 			return 0;
 		}

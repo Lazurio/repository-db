@@ -4,7 +4,7 @@ import {
 	type DraftPanelModel,
 	type DraftPanelRecord,
 	deriveDraftPanel,
-} from "./draftPanelModel.ts";
+} from "../draftPanel.ts";
 
 /**
  * The shared Draft & Publish card.
@@ -20,7 +20,10 @@ import {
  */
 
 export interface DraftPublishPanelApi {
-	/** GET the current review; must include the draft revision. */
+	/**
+	 * GET the card input: the engine status (the sync host's `status()`) plus
+	 * the review records and the draft revision they describe.
+	 */
 	loadReview(): Promise<DraftPanelInput>;
 	/** Publish the whole draft, confirming the displayed revision. */
 	publish(expectedRevision: string): Promise<void>;
@@ -30,12 +33,11 @@ export interface DraftPublishPanelApi {
 		expectedRevision: string,
 	): Promise<void>;
 	/**
-	 * Finish sending the commit that was shown. The head is passed through so
-	 * the host can refuse if the pending commit is no longer that one.
+	 * Finish sending the commit that was shown — after a failed push, or as the
+	 * retry of a send the engine stopped with a conflict. The head is passed
+	 * through so the engine can refuse if the pending commit is no longer that one.
 	 */
 	finishSend?(expectedHead: string | undefined): Promise<void>;
-	/** Retry only the engine-recorded conflict for the head the user saw. */
-	retryConflictSend?(expectedHead: string | undefined): Promise<void>;
 	/** Pull newer published data. */
 	pull?(): Promise<void>;
 	/** Abort the failed operation and restore the pre-publish state. */
@@ -203,7 +205,6 @@ export function DraftPublishPanel({
 						// Actions the host did not wire are shown as unavailable
 						// instead of as buttons that do nothing.
 						finishSend: Boolean(api.finishSend),
-						retryConflictSend: Boolean(api.retryConflictSend),
 						pull: Boolean(api.pull),
 						abortConflict: Boolean(api.abortConflict),
 						markConflictResolved: Boolean(api.markConflictResolved),
@@ -289,14 +290,7 @@ export function DraftPublishPanel({
 			if (kind === "finish_send" && api.finishSend) {
 				void run(
 					() => api.finishSend?.(model.pendingHead) ?? Promise.resolve(),
-					"Odesláno.",
-				);
-				return;
-			}
-			if (kind === "retry_conflict_send" && api.retryConflictSend) {
-				void run(
-					() => api.retryConflictSend?.(model.pendingHead) ?? Promise.resolve(),
-					"Bezpečné sloučení proběhlo a odeslání je hotové.",
+					model.tone === "conflict" ? "Bezpečné sloučení proběhlo a odeslání je hotové." : "Odesláno.",
 				);
 				return;
 			}

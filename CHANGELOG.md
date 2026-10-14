@@ -2,6 +2,102 @@
 
 ## Unreleased
 
+- **One sync path: derived output is an ignored cache, validation runs in the
+  live checkout, and the engine owns the host loop** (#16). Two people changing
+  different records now both publish, a pull comes in under a draft of other
+  records, and a real collision on one record has a way out that keeps the rest
+  of the draft.
+  - Derived output (`generated_manifest`) is never tracked. `ensureGenerated()`
+    (`db.ensureGenerated()`, `repository-db generate`) builds it in the live
+    checkout, with cwd = the mount and the data repo's own dependencies, only
+    when the tracked content (HEAD tree plus draft bytes) changed; the stamp
+    lives in `.repository-db/generated.stamp.json`. A failing materializer is
+    `MaterializeFailedError` (`materialize_failed`) to the reader and blocks
+    publish; nothing is staged and no draft appears. Derived files take no part
+    in drafts, pull overlap checks, conflicts, review or discard.
+  - Publish: identity → build derived output and validate in the live checkout
+    (a command that changes a tracked file refuses with
+    `generated_side_effect`, and what it changed is put back; commands get a
+    closed stdin) → commit the tracked draft → send. The send lane
+    does Git only (text rebase plus the semantic YAML merge); the checkout moves
+    to the result with `reset --keep`, derived output is rebuilt and validated
+    there, and on failure the checkout returns to the local commit with a
+    recorded conflict of kind `validation`; nothing is pushed. A push rejected
+    because the remote moved again is integrated anew, up to three attempts.
+  - Configuration follows the checkout. `RepositoryDb.config` re-reads
+    `repository-db.yaml` whenever the file changed, so a colleague's stricter
+    validator or new derived artifact applies after a pull; publish validates
+    with the configuration in the checkout, and a send validates the integrated
+    result with the configuration that result holds. A change of the boundary
+    (`data_repo.remote`, `data_repo.branch`, `layout.data`) or an unreadable
+    configuration fails closed with `ConfigChangedError` (`config_changed`):
+    a send returns to the confirmed commit and pushes nothing, a pull is refused
+    before anything moves, and the sync host reopens the checkout.
+  - `finishSend` also retries a send the engine stopped with a conflict (it
+    replaces `retryConflictSend`). Conflicts carry `kind: "merge" | "validation"`.
+  - `pull` fast-forwards under a draft of other records; an overlap throws
+    `PullBlockedError` with the records (revert them, pull, redo). Reverting one
+    record works while derived output exists.
+  - `createSyncHost({ mountRoot, intervalMs, autoPull })`: serialized mutation
+    queue `run(kind, fn)` per checkout, `status()`/`refresh()`, `subscribe()`
+    events (`status`, `remote-pulled`, `conflict`, `error`), background fetch
+    with auto-pull also under an unrelated draft, and recovery when the
+    checkout appears after start (a failed open is never cached).
+  - One card model: `deriveDraftPanel` moves to the core package, takes the
+    engine `SyncStatus` (plus conflict, revision, review records, refused pull)
+    and is what `./ui` renders. `SyncStatus` gains `head`.
+  - Credential preflight is asynchronous; a successful check is reused in the
+    process for five minutes, a failed one never.
+  - `init` ignores `/generated/` and no longer commits `generated/.gitkeep`.
+  - A config's `schema_version` was already enforced; it is now tested.
+
+  **Breaking:**
+  - `RepositoryDb.open()` refuses a data repo that tracks (or does not ignore) a
+    declared derived path (`TrackedDerivedOutputError`, code
+    `derived_output_tracked`, with `migration` commands: `git rm -r --cached`,
+    the `.gitignore` line, an ordinary commit and push) or tracks
+    `.repository-db/` (`engine_state_tracked`). Migrate each data repo once
+    before upgrading.
+  - Removed `PublishOptions.skipValidate` / `skipMaterialize`,
+    `retryConflictSend` (facade and function) and the CLI `retry-send` (use
+    `finishSend` / `finish-send`), `RepositoryDb.fetchAsync()` and
+    `clearDraftProvenance()`. `db.validate()` is async and builds derived output
+    first; `db.pull()` takes `{ fetch?: boolean }`.
+  - Removed the generated-output policy: `undeclaredGeneratedDiffs`,
+    `assertDeclaredGeneratedOnly`, `materializeGenerated`, `isPathDeclared`,
+    the `generated_policy` readiness kind and error, the `generated/.gitkeep`
+    exception, discard reasons `generated_artifact` and
+    `related_generated_changes`, `ResourceChangeKind` `"generated"`,
+    `ReviewTechnicalReferenceKind` `"generated_path"` and `generatedFrom`. A
+    tracked file under `generated/` that is not declared is ordinary data.
+  - Removed speculative review-state types: `ReviewState`, `ReviewStateValue`,
+    `ReviewedStateKey`, `ReviewUiAnchor`, `ReviewableResource.reviewState`,
+    `ReviewFieldSummary.uiAnchor` and the `unreviewed_change` readiness kind.
+  - Removed `deriveDraftPublishCard` and its types and contract document; use
+    `deriveDraftPanel`. `DraftPanelInput` now takes `status: SyncStatus | null`
+    (plus `conflict`, `revision`, `records?`, `pullBlocked?`) instead of
+    `state`/`ahead`/`behind`/`pendingHead`; the `retry_conflict_send` action and
+    the `retryConflictSend` panel API/capability are folded into
+    `finish_send` / `finishSend`.
+  - Legacy on-disk state is refused, not migrated: a publish lock without
+    `token`/`processStart` (pre-3.1) asks for a clean checkout
+    (`legacy_engine_state`, also from record writes, never "try again"); a conflict
+    record without `pendingHead` (pre-3.2, including autostash records) is
+    reported as `operation: "legacy"`, `abortConflict` refuses it with
+    `legacy_engine_state`, and `conflict --resolved` clears it after the
+    checkout was cleaned by hand. A historically tracked lock is no longer
+    untracked by publish.
+  - `checkCredentials` / `assertCredentials` are async.
+  - The public API is trimmed to what apps use plus the new API. No longer
+    exported: Git runners (`runGitAsync`, `runGitAsyncOrThrow`,
+    `gitFetchAsync`, `DEFAULT_GIT_NETWORK_TIMEOUT_MS`, `GitResult`), the
+    publish/pull/conflict/status/origin/credential/lock functions (use the
+    facade or the sync host; `acquirePublishLock` included — an app no longer
+    commits), `buildCommitMessage`, `newChangeId`, the trailer key lists,
+    config parsing helpers, `assertDataRepoBoundary`, `collectInputChanges`,
+    `computeReviewSnapshot`, `globToRegExp`, `summarizeValue`,
+    `parseDraftRevision`, `readYamlFile`, `atomicTempPath`.
+
 - **Publish refuses early without a Git identity.** Before it materializes,
   stages or replays anything, publish asks Git whether it can build an author
   and a committer (`git var GIT_AUTHOR_IDENT` / `GIT_COMMITTER_IDENT`). If it

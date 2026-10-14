@@ -3,7 +3,6 @@ import path from "node:path";
 import { assertDataRepoBoundary } from "./boundary.ts";
 import { activeConflict } from "./conflict.ts";
 import { computeDraftRevision } from "./draftRevision.ts";
-import { isPathDeclared } from "./generated.ts";
 import {
 	gitAheadBehind,
 	gitDirtyPaths,
@@ -24,11 +23,12 @@ import { type RepositoryDbConfig, RepositoryDbError } from "./types.ts";
  *   - `draft`   — the whole shared draft returns to the published state.
  *
  * Anything in between is refused with a readable reason rather than guessed at.
- * A record whose revert would leave related data inconsistent (a stale generated
- * artifact, a half-undone rename) is not "reverted as best we can"; the action
- * is simply not available, and the panel says why. This engine does not model
- * dependencies between records, and it must never touch a change the user did
- * not ask about.
+ * A record whose revert would leave related data inconsistent (a half-undone
+ * rename) is not "reverted as best we can"; the action is simply not
+ * available, and the panel says why. This engine does not model dependencies
+ * between records, and it must never touch a change the user did not ask
+ * about. Derived output is an ignored cache rebuilt from what remains, so it
+ * never stands in the way of a revert.
  *
  * Reverting a single field is not an engine primitive either: Git works per
  * file, so a field revert is an ordinary write of the baseline value by the app.
@@ -75,12 +75,7 @@ export class DraftChangedError extends RepositoryDbError {
 
 /** This particular revert is out of the supported scope; the reason explains why. */
 export class RevertNotSupportedError extends RepositoryDbError {
-	readonly reason:
-		| "not_in_draft"
-		| "generated_artifact"
-		| "related_generated_changes"
-		| "renamed_record"
-		| "not_canonical_data";
+	readonly reason: "not_in_draft" | "renamed_record" | "not_canonical_data";
 
 	constructor(reason: RevertNotSupportedError["reason"], message: string) {
 		super("revert_not_supported", message);
@@ -128,15 +123,13 @@ function assertDiscardable(mountRoot: string, config: RepositoryDbConfig): void 
 /**
  * Is a single-record revert safe and predictable here?
  *
- * Deliberately narrow: exactly one canonical data file, no rename involved, and
- * no dirty generated output that the revert would leave stale.
+ * Deliberately narrow: exactly one canonical data file, no rename involved.
  */
 function assertRecordRevertSupported(
-	mountRoot: string,
 	config: RepositoryDbConfig,
 	relativePath: string,
 	dirtyPaths: readonly string[],
-	renameSources: Map<string, string> = gitRenameSources(mountRoot),
+	renameSources: Map<string, string>,
 ): void {
 	// Checked first: the source of a staged rename is shown in review as a
 	// deleted record but is not in Git's dirty list, and "renamed" is the true
@@ -155,34 +148,12 @@ function assertRecordRevertSupported(
 		);
 	}
 
-	const generatedPrefix = `${config.layout.generated}/`;
-	// Generated output is the generated layout plus any declared artifact that
-	// lives elsewhere — both are rebuilt on publish, neither is a record.
-	const isGenerated = (entry: string) =>
-		entry === config.layout.generated ||
-		entry.startsWith(generatedPrefix) ||
-		isPathDeclared(entry, config);
-	if (isGenerated(relativePath)) {
-		throw new RevertNotSupportedError(
-			"generated_artifact",
-			"This is generated output, not a record. It is rebuilt on publish; revert the record it comes from instead.",
-		);
-	}
 	if (!relativePath.startsWith(`${config.layout.data}/`)) {
 		throw new RevertNotSupportedError(
 			"not_canonical_data",
 			"Only canonical records can be reverted individually. Discard the whole draft, or change this file the ordinary way.",
 		);
 	}
-
-	const dirtyGenerated = dirtyPaths.filter(isGenerated);
-	if (dirtyGenerated.length > 0) {
-		throw new RevertNotSupportedError(
-			"related_generated_changes",
-			"The draft also contains generated data built from these records. Reverting one record alone would leave it inconsistent — discard the whole draft instead.",
-		);
-	}
-
 }
 
 /**
@@ -250,7 +221,7 @@ export function discardDraft(
 			clearDraftOwner(mountRoot);
 		} else {
 			const relativePath = options.scope.path;
-			assertRecordRevertSupported(mountRoot, config, relativePath, dirtyPaths);
+			assertRecordRevertSupported(config, relativePath, dirtyPaths, gitRenameSources(mountRoot));
 
 			if (existsInHead(mountRoot, relativePath)) {
 				runGitOrThrow(mountRoot, ["checkout", "HEAD", "--", relativePath]);
@@ -334,7 +305,7 @@ export function recordRevertAvailabilityBatch(
 	const renameSources = gitRenameSources(mountRoot);
 	for (const relativePath of relativePaths) {
 		try {
-			assertRecordRevertSupported(mountRoot, config, relativePath, dirtyPaths, renameSources);
+			assertRecordRevertSupported(config, relativePath, dirtyPaths, renameSources);
 			results.set(relativePath, { supported: true });
 		} catch (error) {
 			results.set(relativePath, {

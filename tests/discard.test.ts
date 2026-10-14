@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { DraftChangedError, RevertNotSupportedError } from "../src/discard.ts";
+import { DraftChangedError } from "../src/discard.ts";
 import { readDraftOwner } from "../src/origin.ts";
 import { RepositoryDb } from "../src/repositoryDb.ts";
 import { toStableYaml } from "../src/yamlIo.ts";
@@ -9,6 +9,7 @@ import { createFixtureRepo, git, writeFixtureDocument } from "./fixtures.ts";
 
 const ANNA = "Anna <anna@example.com>";
 
+/** Declare derived output, ignored by the data repo as every derived path must be. */
 function declareGeneratedArtifact(fixture: {
 	mountPath: string;
 	originPath: string;
@@ -27,6 +28,7 @@ function declareGeneratedArtifact(fixture: {
 		}),
 		"utf8",
 	);
+	writeFileSync(path.join(fixture.mountPath, ".gitignore"), "/.repository-db/\n/generated/rollup.json\n", "utf8");
 	git(fixture.mountPath, ["add", "--all"]);
 	git(fixture.mountPath, ["commit", "--message", "declare generated artifact"]);
 	git(fixture.mountPath, ["push", "--quiet", "origin", fixture.branch]);
@@ -86,35 +88,24 @@ describe("discard — record scope", () => {
 		}
 	});
 
-	test("does not offer a record revert while generated data is also in the draft", () => {
+	test("reverts a record while derived output built from the draft exists", () => {
 		const fixture = createFixtureRepo();
 		try {
 			declareGeneratedArtifact(fixture);
 			const db = RepositoryDb.open(fixture.mountPath);
 			writeFixtureDocument(fixture.mountPath, "thing-1", { name: "draft" });
-			writeFileSync(
-				path.join(fixture.mountPath, "generated/rollup.json"),
-				'{"count":1}\n',
-				"utf8",
-			);
+			writeFixtureDocument(fixture.mountPath, "thing-2", { name: "kept" });
+			// Derived output is an ignored cache: it is not part of the draft and
+			// is rebuilt from what remains, so it never blocks a revert.
+			writeFileSync(path.join(fixture.mountPath, "generated/rollup.json"), '{"count":2}\n', "utf8");
 
-			const availability = db.canRevertRecord("data/things/thing-1.yaml");
-			expect(availability.supported).toBe(false);
-			expect(availability.reason).toContain("generated data");
-
-			expect(() =>
-				db.discard({
-					scope: { kind: "record", path: "data/things/thing-1.yaml" },
-					expectedRevision: db.draftRevision(),
-				}),
-			).toThrow(RevertNotSupportedError);
-
-			// The documented way out is the whole draft, and it works.
+			expect(db.canRevertRecord("data/things/thing-1.yaml")).toEqual({ supported: true });
 			const result = db.discard({
-				scope: { kind: "draft" },
+				scope: { kind: "record", path: "data/things/thing-1.yaml" },
 				expectedRevision: db.draftRevision(),
 			});
-			expect(result.remainingDirtyPaths).toEqual([]);
+			expect(result.removed).toEqual(["data/things/thing-1.yaml"]);
+			expect(result.remainingDirtyPaths).toEqual(["data/things/thing-2.yaml"]);
 		} finally {
 			rmSync(fixture.root, { recursive: true, force: true });
 		}
@@ -141,7 +132,7 @@ describe("discard — record scope", () => {
 		}
 	});
 
-	test("refuses generated output, non-canonical files and paths outside the draft", () => {
+	test("refuses derived output (never part of a draft), non-canonical files and paths outside the draft", () => {
 		const fixture = createFixtureRepo();
 		try {
 			declareGeneratedArtifact(fixture);
@@ -153,7 +144,7 @@ describe("discard — record scope", () => {
 			);
 			writeFileSync(path.join(fixture.mountPath, "scripts/helper.mjs"), "// draft\n", "utf8");
 
-			expect(db.canRevertRecord("generated/rollup.json").reason).toContain("generated output");
+			expect(db.canRevertRecord("generated/rollup.json").reason).toContain("not part of the current draft");
 			expect(db.canRevertRecord("scripts/helper.mjs").reason).toContain(
 				"Only canonical records",
 			);
@@ -305,7 +296,6 @@ describe("publish — displayed revision", () => {
 					actor: ANNA,
 					source: "test",
 					expectedRevision: shownRevision,
-					skipValidate: true,
 				}),
 			).rejects.toThrow(DraftChangedError);
 			// Nothing was committed: both records are still draft.
@@ -317,7 +307,6 @@ describe("publish — displayed revision", () => {
 				actor: ANNA,
 				source: "test",
 				expectedRevision: db.draftRevision(),
-				skipValidate: true,
 			});
 			expect(result.state).toBe("published");
 			expect(db.status().dirtyPaths).toEqual([]);

@@ -138,7 +138,7 @@ describe("integration conflicts happen in the lane, never in the checkout", () =
 		}
 	});
 
-	test("retries only an engine-recorded clean pending send with the displayed head", async () => {
+	test("finishing the send retries an engine-recorded conflict, only with the displayed head", async () => {
 		const fixture = createFixtureRepo();
 		try {
 			const base = {
@@ -175,12 +175,13 @@ describe("integration conflicts happen in the lane, never in the checkout", () =
 			).rejects.toThrow(/publish stopped/);
 			const head = git(fixture.mountPath, ["rev-parse", "HEAD"]).trim();
 			expect(db.conflict()).toMatchObject({
+				kind: "merge",
 				operation: "publish",
 				pendingHead: head,
 				retryable: true,
 				paths: ["data/things/thing-1.yaml"],
 			});
-			await expect(db.retryConflictSend({ expectedHead: "not-the-displayed-head" })).rejects.toThrow(
+			await expect(db.finishSend({ expectedHead: "not-the-displayed-head" })).rejects.toThrow(
 				/no longer the one that was shown/,
 			);
 			expect(db.conflict()).toBeDefined();
@@ -199,7 +200,7 @@ describe("integration conflicts happen in the lane, never in the checkout", () =
 			git(third, ["commit", "--message", "converge retry value"]);
 			git(third, ["push", "origin", fixture.branch]);
 
-			const result = await db.retryConflictSend({ expectedHead: head });
+			const result = await db.finishSend({ expectedHead: head });
 			expect(result.state).toBe("published");
 			expect(db.conflict()).toBeUndefined();
 			expect(readThing(fixture.mountPath, "thing-1")).toContain("stage: cancelled");
@@ -210,9 +211,10 @@ describe("integration conflicts happen in the lane, never in the checkout", () =
 		}
 	});
 
-	test("never retries an external Git conflict marker", async () => {
+	test("never retries a recorded conflict that is not an engine send", async () => {
 		const fixture = createFixtureRepo();
 		try {
+			const head = git(fixture.mountPath, ["rev-parse", "HEAD"]).trim();
 			const { writeConflictState } = await import("../src/conflict.ts");
 			writeConflictState(fixture.mountPath, {
 				detectedAt: "2026-10-04T10:00:00.000Z",
@@ -220,11 +222,38 @@ describe("integration conflicts happen in the lane, never in the checkout", () =
 				gitState: "fixture external operation",
 				message: "external fixture conflict",
 				handoff: "fixture",
+				pendingHead: head,
+				retryable: false,
+			});
+			const db = RepositoryDb.open(fixture.mountPath);
+			await expect(db.finishSend({ expectedHead: head })).rejects.toMatchObject({ code: "conflict_active" });
+			expect(db.conflict()?.operation).toBe("external");
+		} finally {
+			rmSync(fixture.root, { recursive: true, force: true });
+		}
+	});
+
+	test("a conflict an older engine recorded is not interpreted: abort refuses, a clean checkout clears it", async () => {
+		const fixture = createFixtureRepo();
+		try {
+			const { writeConflictState } = await import("../src/conflict.ts");
+			// The shape older engines wrote: no pending commit.
+			writeConflictState(fixture.mountPath, {
+				detectedAt: "2026-09-01T10:00:00.000Z",
+				operation: "publish",
+				gitState: "rebase stopped",
+				message: "publish stopped",
 			});
 			const db = RepositoryDb.open(fixture.mountPath);
 			const head = git(fixture.mountPath, ["rev-parse", "HEAD"]).trim();
-			await expect(db.retryConflictSend({ expectedHead: head })).rejects.toThrow(/Only an engine-recorded/);
-			expect(db.conflict()?.operation).toBe("external");
+			expect(db.conflict()?.operation).toBe("legacy");
+			expect(db.conflict()?.handoff).toContain("Clean the checkout by hand");
+			expect(() => db.abortConflict()).toThrow(/older repository-db/);
+			await expect(db.finishSend({ expectedHead: head })).rejects.toMatchObject({ code: "conflict_active" });
+			expect(git(fixture.mountPath, ["rev-parse", "HEAD"]).trim()).toBe(head);
+
+			db.markConflictResolved();
+			expect(db.conflict()).toBeUndefined();
 		} finally {
 			rmSync(fixture.root, { recursive: true, force: true });
 		}
@@ -260,9 +289,9 @@ describe("integration conflicts happen in the lane, never in the checkout", () =
 			expect(rebase.exitCode).not.toBe(0);
 
 			const db = RepositoryDb.open(fixture.mountPath);
-			await expect(db.retryConflictSend({ expectedHead: head })).rejects.toThrow(
-				/external Git operation or unresolved index/,
-			);
+			await expect(db.finishSend({ expectedHead: head })).rejects.toMatchObject({
+				code: "conflict_active",
+			});
 			expect(db.conflict()?.pendingHead).toBe(head);
 			git(fixture.mountPath, ["rebase", "--abort"]);
 		} finally {

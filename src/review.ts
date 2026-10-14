@@ -3,7 +3,6 @@ import { lstatSync, readFileSync, readlinkSync } from "node:fs";
 import path from "node:path";
 import { assertDataRepoBoundary } from "./boundary.ts";
 import { activeConflict } from "./conflict.ts";
-import { isPathDeclared, isUndeclaredGenerated, undeclaredGeneratedDiffs } from "./generated.ts";
 import {
 	gitBatchShow,
 	gitDirtyPaths,
@@ -136,17 +135,11 @@ function technicalRefKind(
 	config: RepositoryDbConfig,
 ): ReviewTechnicalReferenceKind {
 	if (relativePath.startsWith(`${config.layout.data}/`)) return "canonical_data_path";
-	if (relativePath.startsWith(`${config.layout.generated}/`)) return "generated_path";
 	if (relativePath.startsWith(`${config.layout.scripts}/`)) return "supporting_path";
 	return "unknown_path";
 }
 
-function changeKindOf(
-	baseline: string | undefined,
-	draft: string | undefined,
-	isGenerated: boolean,
-): ResourceChangeKind {
-	if (isGenerated) return "generated";
+function changeKindOf(baseline: string | undefined, draft: string | undefined): ResourceChangeKind {
 	if (baseline === undefined && draft !== undefined) return "created";
 	if (baseline !== undefined && draft === undefined) return "deleted";
 	if (baseline !== undefined && draft !== undefined) return "modified";
@@ -299,7 +292,7 @@ export function collectInputChanges(
 		// The working tree is the current truth in both cases: a committed change
 		// is also present there, so one read covers both.
 		const draft = workingContent(mountRoot, relativePath);
-		const kind = changeKindOf(baseline, draft, refKind === "generated_path");
+		const kind = changeKindOf(baseline, draft);
 		return {
 			changeId: `path:${relativePath}`,
 			kind,
@@ -364,8 +357,7 @@ function genericResource(
 
 	return {
 		appId: config.app,
-		resourceType:
-			input.technicalRefs[0]?.kind === "generated_path" ? "generated-artifact" : "file",
+		resourceType: "file",
 		stableResourceId: `path:${relativePath}`,
 		label: path.basename(relativePath),
 		contractMetadata: {
@@ -373,7 +365,6 @@ function genericResource(
 			schemaVersion: `${config.schema.name}@${config.schema.version}`,
 		},
 		changes: [change],
-		reviewState: { value: "unreviewed" },
 		fallback: ladder(
 			level,
 			parseable
@@ -432,7 +423,6 @@ function worstLevel(levels: readonly ReviewFallbackLevel[]): ReviewFallbackLevel
 
 function publishReadiness(
 	mountRoot: string,
-	config: RepositoryDbConfig,
 	resources: readonly ReviewableResource[],
 ): PublishReadinessSummary {
 	const references: PublishReadinessReference[] = [];
@@ -443,30 +433,6 @@ function publishReadiness(
 			kind: "conflict",
 			blocking: true,
 			message: `Repozitář je v konfliktním stavu (${conflict.operation}); publikace je zablokovaná.`,
-		});
-	}
-
-	// Everything unsent counts, not only the dirty tree: a committed artifact
-	// that is not declared is refused by the policy just the same.
-	const undeclared = [
-		...new Set([
-			...undeclaredGeneratedDiffs(mountRoot, config),
-			...resources
-				.flatMap((resource) => resource.changes.flatMap((change) => change.technicalRefs))
-				.map((ref) => ref.path)
-				.filter((entry) => isUndeclaredGenerated(entry, config)),
-		]),
-	].sort();
-	if (undeclared.length > 0) {
-		references.push({
-			kind: "generated_policy",
-			blocking: true,
-			message:
-				"Změněné generované soubory nejsou deklarované v generated_manifest; publikace je odmítne.",
-			technicalRefs: undeclared.map((entry) => ({
-				path: entry,
-				kind: "generated_path" as const,
-			})),
 		});
 	}
 
@@ -565,7 +531,7 @@ export async function computeReviewSnapshot(
 		head,
 		computedAt: options.computedAt,
 		resources,
-		publishReadiness: publishReadiness(mountRoot, config, resources),
+		publishReadiness: publishReadiness(mountRoot, resources),
 		fallback: ladder(
 			snapshotLevel,
 			[...adapterFailures, ...adapterGaps].length > 0
@@ -595,5 +561,3 @@ export async function computeReviewSnapshot(
 	);
 	return snapshot;
 }
-
-export { isPathDeclared };

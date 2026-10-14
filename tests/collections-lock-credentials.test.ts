@@ -3,8 +3,8 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { checkCredentials } from "../src/credentials.ts";
-import { acquirePublishLock } from "../src/lock.ts";
+import { checkCredentials, clearCredentialCache } from "../src/credentials.ts";
+import { acquirePublishLock, withDraftWriteLock } from "../src/lock.ts";
 import { RepositoryDb } from "../src/repositoryDb.ts";
 import { toStableYaml } from "../src/yamlIo.ts";
 import {
@@ -137,11 +137,36 @@ describe("publish lock", () => {
 					pid: 999999999,
 					hostname: os.hostname(),
 					acquiredAt: new Date(0).toISOString(),
+					token: "dead",
+					processStart: "unavailable",
 				}),
 				"utf8",
 			);
 			const release = acquirePublishLock(root);
 			release();
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	test("a lock written by an older engine is not judged; it asks for a clean checkout", () => {
+		const root = path.join(os.tmpdir(), `repository-db-legacy-lock-${process.pid}`);
+		mkdirSync(path.join(root, ".repository-db"), { recursive: true });
+		try {
+			const lockFile = path.join(root, ".repository-db", "publish.lock");
+			writeFileSync(
+				lockFile,
+				JSON.stringify({ pid: 999999999, hostname: os.hostname(), acquiredAt: new Date(0).toISOString() }),
+				"utf8",
+			);
+			expect(() => acquirePublishLock(root)).toThrow(
+				expect.objectContaining({ code: "legacy_engine_state", message: expect.stringContaining("Clean the checkout") }),
+			);
+			expect(existsSync(lockFile)).toBe(true);
+			// A record write says the same, not "try again in a moment".
+			expect(() => withDraftWriteLock(root, () => undefined)).toThrow(
+				expect.objectContaining({ code: "legacy_engine_state" }),
+			);
 		} finally {
 			rmSync(root, { recursive: true, force: true });
 		}
@@ -163,7 +188,7 @@ describe("credential preflight", () => {
 			delete process.env.GIT_CONFIG_SYSTEM;
 	});
 
-	test("non-GitHub HTTPS helper must fill credentials, not merely exist", () => {
+	test("non-GitHub HTTPS helper must fill credentials, not merely exist", async () => {
 		const root = path.join(os.tmpdir(), `repository-db-credentials-${process.pid}`);
 		rmSync(root, { recursive: true, force: true });
 		mkdirSync(root, { recursive: true });
@@ -177,12 +202,43 @@ describe("credential preflight", () => {
 			process.env.GIT_CONFIG_GLOBAL = gitConfig;
 			process.env.GIT_CONFIG_SYSTEM = "/dev/null";
 
-			const check = checkCredentials("https://gitlab.com/example/private-data.git");
+			const check = await checkCredentials("https://gitlab.com/example/private-data.git");
 
 			expect(check.ok).toBe(false);
 			expect(check.mechanism).toBe("none");
 			expect(check.detail).toMatch(/did not return a non-interactive credential/);
 		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	test("a successful check is reused for a while; a failed one is asked again", async () => {
+		const root = path.join(os.tmpdir(), `repository-db-credential-cache-${process.pid}`);
+		rmSync(root, { recursive: true, force: true });
+		mkdirSync(root, { recursive: true });
+		try {
+			clearCredentialCache();
+			const calls = path.join(root, "calls");
+			const answer = path.join(root, "answer");
+			const gh = path.join(root, "gh");
+			writeFileSync(gh, `#!/bin/sh\necho x >> '${calls}'\nexit $(cat '${answer}')\n`, { mode: 0o755 });
+			process.env.REPOSITORY_DB_GH_BIN = gh;
+			process.env.GIT_CONFIG_GLOBAL = "/dev/null";
+			process.env.GIT_CONFIG_SYSTEM = "/dev/null";
+			const remote = "https://github.com/example/private-data.git";
+			const count = () => readFileSync(calls, "utf8").split("\n").filter(Boolean).length;
+
+			writeFileSync(answer, "1");
+			expect((await checkCredentials(remote)).ok).toBe(false);
+			expect((await checkCredentials(remote)).ok).toBe(false);
+			expect(count()).toBe(2);
+
+			writeFileSync(answer, "0");
+			expect((await checkCredentials(remote)).mechanism).toBe("gh");
+			expect((await checkCredentials(remote)).mechanism).toBe("gh");
+			expect(count()).toBe(3);
+		} finally {
+			clearCredentialCache();
 			rmSync(root, { recursive: true, force: true });
 		}
 	});
