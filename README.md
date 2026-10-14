@@ -68,16 +68,23 @@ signal where a host can accept them.
 
 ## Host sync service
 
-`createSyncHost({ mountRoot, intervalMs?, autoPull? })` is the host side of
+`createSyncHost({ mountRoot, intervalMs?, autoPull?, recordOf? })` is the host side of
 synchronisation, so no app rebuilds it. It is framework-agnostic; the app keeps
 only its HTTP/SSE wiring.
 
 - `run(kind, db => …)` — a serialized mutation queue per checkout (across every
   host in the process); every write, publish, pull and discard goes through it.
+- `read(db => …)` — every other access, without the queue. A read that finds the
+  checkout changed under it (a moved checkout, a boundary change in its
+  configuration) drops the facade, so the next call opens it again. `db()`
+  hands out the current facade for synchronous code, but errors it meets later
+  are not seen by the host; prefer `read`.
 - `status()` / `refresh()` — the snapshot the card is derived from: engine
   status, conflict, draft revision, draft owner, a refused pull, a failed fetch.
-- `subscribe(listener)` — `status`, `remote-pulled` (changed paths and
-  Collection record refs), `conflict`, `error`.
+- `subscribe(listener)` — `status`, `remote-pulled` (changed paths and the
+  records they are), `conflict`, `error`. The engine knows the Collection layout
+  `<data>/<collection>/<id>.yaml`; an app with nested record files passes
+  `recordOf(path, collectionRecord)` and returns `collectionRecord` for the rest.
 - `start()` / `stop()` — a background check every `intervalMs` (default 30 s):
   fetch, then fast-forward whenever the engine allows it, also under a draft of
   other records.

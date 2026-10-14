@@ -312,8 +312,8 @@ omitted revision means "the draft as it stands right now".
 
 A stale revision returns a conflict response carrying the current one, so the
 panel can refresh and let the user decide again. Every route that changes the
-checkout goes through the sync host's `run()`; `events` forwards its
-`subscribe()` events. Publish stays explicit and fail-closed. Pulling is the
+checkout goes through the sync host's `run()`, every read through its
+`read()`; `events` forwards its `subscribe()` events. Publish stays explicit and fail-closed. Pulling is the
 sync host's job: it fetches in the background and fast-forwards whenever the
 engine allows it — also under a draft of other records — so nobody has to
 remember to click; no browser-owned loop exists.

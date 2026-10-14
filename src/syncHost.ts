@@ -19,6 +19,9 @@ import {
  *   - a serialized mutation queue, `run(kind, fn)`, that every write, publish,
  *     pull and discard goes through, so in-process work waits its turn instead
  *     of meeting the engine's fail-fast gate;
+ *   - `read(fn)` for everything else: no queue, but the same facade handling,
+ *     so a read that finds the checkout changed under it never keeps a stale
+ *     facade;
  *   - a status snapshot, `status()`, which is what the Draft & Publish card is
  *     derived from (`deriveDraftPanel`);
  *   - events, `subscribe(listener)`: `status`, `remote-pulled` (with the
@@ -39,6 +42,16 @@ export interface SyncHostOptions {
 	intervalMs?: number;
 	/** Fast-forward to colleagues' work in the background; default true. */
 	autoPull?: boolean;
+	/**
+	 * Which record a changed path is, for `remote-pulled`. The engine knows only
+	 * the Collection layout (`<data>/<collection>/<id>.yaml`), passed in as
+	 * `collectionRecord`; an app with nested record files maps them here and
+	 * returns `collectionRecord` for the rest. `null` means "not a record".
+	 */
+	recordOf?: (
+		path: string,
+		collectionRecord: { collection: string; id: string } | null,
+	) => { collection: string; id: string } | null;
 }
 
 export interface SyncHostProblem {
@@ -88,10 +101,19 @@ export interface SyncHost {
 	start(): void;
 	stop(): void;
 	/**
-	 * The facade for reads. Throws `mount_unavailable` while the checkout
-	 * cannot be opened; it is tried again on the next call.
+	 * The current facade, for a synchronous read. Throws `mount_unavailable`
+	 * while the checkout cannot be opened; it is tried again on the next call.
+	 * Prefer {@link SyncHost.read}: an error this facade meets later is not seen
+	 * by the host, so it is only dropped by the next `read`, `run` or check.
 	 */
 	db(): RepositoryDb;
+	/**
+	 * Run a read against the checkout, without waiting for the mutation queue.
+	 * A read that finds the checkout no longer what was opened (moved, a changed
+	 * boundary in its configuration) drops the facade, so the next call opens it
+	 * again. Reads must not write; writes go through {@link SyncHost.run}.
+	 */
+	read<T>(operation: (db: RepositoryDb) => T | Promise<T>): Promise<T>;
 	/**
 	 * Run one mutation after every earlier one on this checkout has finished
 	 * (in this process). The status is refreshed afterwards and events fire.
@@ -141,22 +163,29 @@ function isMountGone(error: unknown): boolean {
 	);
 }
 
-function recordRefs(db: RepositoryDb, paths: readonly string[]): SyncHostRecordRef[] {
-	const prefix = `${db.config.layout.data}/`;
+/** The Collection layout: `<data>/<collection>/<encodeURIComponent(id)>.yaml`. */
+function collectionRecordOf(dataDir: string, entry: string): { collection: string; id: string } | null {
+	const prefix = `${dataDir}/`;
+	if (!entry.startsWith(prefix) || !entry.endsWith(".yaml")) return null;
+	const segments = entry.slice(prefix.length).split("/");
+	if (segments.length !== 2 || !segments[0] || !segments[1]) return null;
+	try {
+		return { collection: segments[0], id: decodeURIComponent(segments[1].slice(0, -".yaml".length)) };
+	} catch {
+		return null;
+	}
+}
+
+function recordRefs(
+	db: RepositoryDb,
+	paths: readonly string[],
+	recordOf: SyncHostOptions["recordOf"],
+): SyncHostRecordRef[] {
 	const refs: SyncHostRecordRef[] = [];
-	for (const entry of paths) {
-		if (!entry.startsWith(prefix) || !entry.endsWith(".yaml")) continue;
-		const segments = entry.slice(prefix.length).split("/");
-		if (segments.length !== 2 || !segments[0] || !segments[1]) continue;
-		try {
-			refs.push({
-				collection: segments[0],
-				id: decodeURIComponent(segments[1].slice(0, -".yaml".length)),
-				path: entry,
-			});
-		} catch {
-			/* not a Collection file name */
-		}
+	for (const entry of [...paths].sort()) {
+		const collectionRecord = collectionRecordOf(db.config.layout.data, entry);
+		const record = recordOf ? recordOf(entry, collectionRecord) : collectionRecord;
+		if (record) refs.push({ collection: record.collection, id: record.id, path: entry });
 	}
 	return refs;
 }
@@ -282,9 +311,22 @@ export function createSyncHost(options: SyncHostOptions): SyncHost {
 		emit({
 			type: "remote-pulled",
 			paths: [...paths],
-			records: recordRefs(db, paths),
+			records: recordRefs(db, paths, options.recordOf),
 			status,
 		});
+	}
+
+	async function read<T>(operation: (db: RepositoryDb) => T | Promise<T>): Promise<T> {
+		const db = open();
+		try {
+			return await operation(db);
+		} catch (error) {
+			if (isMountGone(error)) {
+				facade = undefined;
+				publishStatus();
+			}
+			throw error;
+		}
 	}
 
 	function run<T>(kind: string, operation: (db: RepositoryDb) => T | Promise<T>): Promise<T> {
@@ -382,6 +424,7 @@ export function createSyncHost(options: SyncHostOptions): SyncHost {
 			timer = undefined;
 		},
 		db: open,
+		read,
 		run,
 		refresh,
 		status: () => snapshot,

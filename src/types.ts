@@ -399,8 +399,11 @@ export interface CommitTrailers {
 }
 
 export interface PublishOptions {
-	/** Human actor recorded in the commit trailers, e.g. `Jana <jana@firma.cz>`. */
-	actor: string;
+	/**
+	 * Human actor recorded in the commit trailers, e.g. `Jana <jana@example.com>`.
+	 * Defaults to the Environment's Git author identity (`Name <email>`).
+	 */
+	actor?: string;
 	/**
 	 * Revision of the draft being confirmed. Publish runs only if the draft is
 	 * still exactly that version when the shared gate is taken. A caller with
