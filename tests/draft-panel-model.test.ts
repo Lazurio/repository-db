@@ -303,6 +303,10 @@ describe("the card straight from the engine status", () => {
 		const pull = blocked.actions.find((action) => action.kind === "pull");
 		expect(pull?.enabled).toBe(false);
 		expect(pull?.disabledReason).toContain("Vraťte záznam");
+
+		// Over a commit waiting to be sent, finishing the send integrates instead.
+		const unsent = deriveDraftPanel(input({ status: status({ behind: 2, ahead: 1 }) }));
+		expect(unsent.actions.some((action) => action.kind === "pull")).toBe(false);
 	});
 
 	test("newer data with nothing drafted is a pull", () => {

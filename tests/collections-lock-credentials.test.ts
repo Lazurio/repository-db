@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import os from "node:os";
 import path from "node:path";
 import { checkCredentials, clearCredentialCache } from "../src/credentials.ts";
-import { acquirePublishLock } from "../src/lock.ts";
+import { acquirePublishLock, withDraftWriteLock } from "../src/lock.ts";
 import { RepositoryDb } from "../src/repositoryDb.ts";
 import { toStableYaml } from "../src/yamlIo.ts";
 import {
@@ -159,8 +159,14 @@ describe("publish lock", () => {
 				JSON.stringify({ pid: 999999999, hostname: os.hostname(), acquiredAt: new Date(0).toISOString() }),
 				"utf8",
 			);
-			expect(() => acquirePublishLock(root)).toThrow(/older repository-db\. Clean the checkout/);
+			expect(() => acquirePublishLock(root)).toThrow(
+				expect.objectContaining({ code: "legacy_engine_state", message: expect.stringContaining("Clean the checkout") }),
+			);
 			expect(existsSync(lockFile)).toBe(true);
+			// A record write says the same, not "try again in a moment".
+			expect(() => withDraftWriteLock(root, () => undefined)).toThrow(
+				expect.objectContaining({ code: "legacy_engine_state" }),
+			);
 		} finally {
 			rmSync(root, { recursive: true, force: true });
 		}

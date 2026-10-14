@@ -70,7 +70,8 @@
     the `retryConflictSend` panel API/capability are folded into
     `finish_send` / `finishSend`.
   - Legacy on-disk state is refused, not migrated: a publish lock without
-    `token`/`processStart` (pre-3.1) asks for a clean checkout; a conflict
+    `token`/`processStart` (pre-3.1) asks for a clean checkout
+    (`legacy_engine_state`, also from record writes, never "try again"); a conflict
     record without `pendingHead` (pre-3.2, including autostash records) is
     reported as `operation: "legacy"`, `abortConflict` refuses it with
     `legacy_engine_state`, and `conflict --resolved` clears it after the

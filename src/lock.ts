@@ -157,8 +157,10 @@ export function acquirePublishLock(mountRoot: string): () => void {
 	}
 	if (existing && (typeof existing.token !== "string" || typeof existing.processStart !== "string")) {
 		// Written by an older repository-db, which recorded neither. It is not
-		// judged by guesswork; the operator removes it once nothing runs.
-		throw new PublishLockedError(
+		// judged by guesswork; the operator removes it once nothing runs. Not a
+		// PublishLockedError: callers treat that as "try again in a moment".
+		throw new RepositoryDbError(
+			"legacy_engine_state",
 			`publish lock at ${filePath} was written by an older repository-db. Clean the checkout: make sure no publish is running on ${existing.hostname} (pid ${existing.pid}), then remove that file`,
 		);
 	}

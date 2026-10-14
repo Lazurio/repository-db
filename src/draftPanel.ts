@@ -399,7 +399,9 @@ export function deriveDraftPanel(
 				},
 				// Colleagues' newer work comes in under the draft unless they
 				// changed the same records; then the card says which and how out.
-				...(status.behind > 0
+				// Not over a commit waiting to be sent: finishing the send integrates
+				// the colleagues' work, and the engine refuses a pull meanwhile.
+				...(status.behind > 0 && unsentCommit === 0
 					? [
 							{
 								kind: "pull" as const,
