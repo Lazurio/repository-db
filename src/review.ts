@@ -106,6 +106,19 @@ function baselineContent(
 
 function workingContent(mountRoot: string, relativePath: string): string | undefined {
 	const absolute = path.join(mountRoot, relativePath);
+	// A path with a symlinked directory component is never read, wherever the
+	// link points: Git publishes the link itself, never what lies behind it.
+	const segments = path.normalize(relativePath).split(path.sep).slice(0, -1);
+	let current = mountRoot;
+	for (const segment of segments) {
+		if (!segment || segment === "." || segment === "..") return undefined;
+		current = path.join(current, segment);
+		try {
+			if (lstatSync(current).isSymbolicLink()) return undefined;
+		} catch {
+			return undefined;
+		}
+	}
 	let stats: ReturnType<typeof lstatSync>;
 	try {
 		stats = lstatSync(absolute);
@@ -300,6 +313,7 @@ export function collectInputChanges(
 			draftContentHash: draft === undefined ? undefined : sha256(draft),
 			baselineContentHash: baseline === undefined ? undefined : sha256(baseline),
 			baselineText: baseline,
+			draftText: draft,
 			origin: toOrigin(origins.get(relativePath)),
 		} satisfies ReviewInputChange;
 	});
