@@ -28,15 +28,21 @@ standard for the card is [`draft-publish-standard.md`](draft-publish-standard.md
    revision too.
 7. **Record provenance after a write:**
    `db.recordOrigin(paths, { kind: "app", actor })`. It is information only.
-8. **Render the card from the engine.** Build it with
+8. **Attribute records with a known identity.** When no verified sign-in names
+   the author of a record (a local Environment without a hosted sign-in), use
+   `await host.read((db) => db.identity())`. It returns `{ name, email }`, the
+   identity this Environment commits with, resolved exactly like the publish
+   preflight: configured or explicitly passed, never guessed. It returns `null`
+   when there is none; record the author as unknown then, never a guess.
+9. **Render the card from the engine.** Build it with
    `deriveDraftPanel({ status, conflict, revision, records, pullBlocked })` from
    `host.status()` plus the review, or use `DraftPublishPanel` from
    `@lazurio/repository-db/ui`. Wire only the actions you implement; the rest
    show as unavailable with a reason.
-9. **Forward host events to the browser** (SSE or similar). On `remote-pulled`,
+10. **Forward host events to the browser** (SSE or similar). On `remote-pulled`,
    reload the records named in `records` (or `paths`). If your record files are
    nested, pass `recordOf` to `createSyncHost`.
-10. **Surface the error codes below** in the user's language.
+11. **Surface the error codes below** in the user's language.
 
 ## Must not
 
@@ -56,8 +62,10 @@ standard for the card is [`draft-publish-standard.md`](draft-publish-standard.md
   target path, a path under a symlinked directory is undefined) and `baselineText`
   from the engine. Reading the file itself would follow a symlink and could put
   a host file into the review payload.
-- Invent an actor or a Git identity. Pass `actor` when the app knows the signed-in
-  person; otherwise publish records the Environment's Git identity.
+- Invent an actor or a Git identity, or read one with Git. Pass `actor` when the
+  app knows the signed-in person; otherwise publish records the Environment's
+  Git identity. For record-level attribution without a verified sign-in, use
+  `db.identity()` (below).
 
 ## Data-repo commands
 

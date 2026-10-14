@@ -208,7 +208,9 @@ GIT_AUTHOR_IDENT` / `GIT_COMMITTER_IDENT`). Without them the operation refuses
 with `identity_missing`, and nothing changes. The engine never invents an
 identity; the Environment provides it (the Launchpad sets it when signing in to
 GitHub). When a publish names no `actor`, the Git author (`Name <email>`) is
-recorded as the actor in the trailers.
+recorded as the actor in the trailers. `db.identity()` returns the same
+identity read-only (`{ name, email }`, or `null` when there is none), so an app
+can attribute records without running Git.
 
 ## Boundary guard
 
