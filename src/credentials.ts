@@ -28,7 +28,7 @@ const CREDENTIAL_COMMAND_TIMEOUT_MS = 15_000;
 
 export interface CredentialCheck {
 	ok: boolean;
-	mechanism: "gh" | "ssh-agent" | "credential-helper" | "local-remote" | "none";
+	mechanism: "gh" | "ssh-agent" | "ssh-config" | "credential-helper" | "local-remote" | "none";
 	detail: string;
 }
 
@@ -168,6 +168,26 @@ async function detectCredentials(remote: string): Promise<CredentialCheck> {
 				ok: true,
 				mechanism: "ssh-agent",
 				detail: "ssh-agent holds at least one identity",
+			};
+		}
+	}
+
+	// A key the SSH client finds on its own (a deploy key in ~/.ssh/config, a
+	// default key file) is invisible to ssh-agent; ask the remote itself,
+	// non-interactively, before refusing.
+	if (remote.startsWith("git@") || remote.startsWith("ssh://")) {
+		const probe = await tryRun("git", ["ls-remote", "--heads", remote], {
+			env: {
+				...process.env,
+				GIT_TERMINAL_PROMPT: "0",
+				GIT_SSH_COMMAND: process.env.GIT_SSH_COMMAND ?? "ssh -o BatchMode=yes -o ConnectTimeout=10",
+			},
+		});
+		if (probe.status === 0) {
+			return {
+				ok: true,
+				mechanism: "ssh-config",
+				detail: "git ls-remote reached the remote non-interactively (SSH key from the client configuration)",
 			};
 		}
 	}

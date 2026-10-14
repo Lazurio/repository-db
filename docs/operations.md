@@ -25,8 +25,9 @@ Rules that hold throughout:
 
 ## `identity_missing`
 
-**Meaning:** the Environment has no Git name or e-mail, so nothing can be
-committed. Nothing changed.
+**Meaning:** the Environment has no configured Git name or e-mail, so nothing
+can be committed. A name and address Git would only guess (from the account and
+the host name) do not count. Nothing changed.
 
 **Fix:** sign in to GitHub in the Launchpad, which sets the identity. By hand:
 
@@ -195,8 +196,9 @@ not ad hoc on a live checkout.
 | `conflict_active` | Resolve the conflict first (`repository-db conflict`). |
 | `materialize_failed` / `validation_failed` | Fix the data or the data-repo command, then `repository-db validate`. |
 | `generated_side_effect` | A materializer or validator changed tracked files; fix it to write only declared paths. |
-| `credentials` | Sign in (`gh auth login`), or configure the Environment's credential helper / deploy key. |
+| `credentials` | Sign in (`gh auth login`), or configure the Environment's credential helper / deploy key (a key in `~/.ssh/config` is accepted when `git ls-remote` reaches the remote non-interactively). |
 | `boundary_violation` | Run the command against the data checkout itself, on its branch, with the right `origin`. |
 | `revert_not_supported` | Discard the whole draft instead (`repository-db discard --draft`), or change the record by an ordinary edit. |
 | `unpushed_commit` | Finish the waiting send before discarding. |
 | `mount_unavailable` | The checkout is not there yet; the sync host opens it when it appears. |
+| `empty_repository` | The data repository has no commits yet; publish or clone its first commit. The sync host opens it on a later check. |

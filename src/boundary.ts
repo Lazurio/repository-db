@@ -4,8 +4,9 @@ import {
 	gitOperationInProgress,
 	gitRemoteUrl,
 	gitToplevel,
+	runGit,
 } from "./git.ts";
-import { BoundaryViolationError, type RepositoryDbConfig } from "./types.ts";
+import { BoundaryViolationError, type RepositoryDbConfig, RepositoryDbError } from "./types.ts";
 
 /**
  * Normalize Git remote URLs so that the ssh and https spellings of the same
@@ -74,6 +75,15 @@ export function assertDataRepoBoundary(
 	if (normalizeRemoteUrl(remote) !== normalizeRemoteUrl(config.dataRepo.remote)) {
 		throw new BoundaryViolationError(
 			`origin remote mismatch: repository has "${remote}", repository-db.yaml expects "${config.dataRepo.remote}"`,
+		);
+	}
+
+	// A data repository without a first commit has no branch to check yet;
+	// say so instead of failing in Git ("ambiguous argument 'HEAD'").
+	if (runGit(resolvedMount, ["rev-parse", "--verify", "--quiet", "HEAD"]).status !== 0) {
+		throw new RepositoryDbError(
+			"empty_repository",
+			`the data repository has no commits yet; publish or clone its first commit (branch ${config.dataRepo.branch}) before opening it`,
 		);
 	}
 

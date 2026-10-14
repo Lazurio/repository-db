@@ -159,7 +159,8 @@ function isMountGone(error: unknown): boolean {
 		error instanceof RepositoryDbError &&
 		(error.code === "boundary_violation" ||
 			error.code === "config_missing" ||
-			error.code === "config_changed")
+			error.code === "config_changed" ||
+			error.code === "empty_repository")
 	);
 }
 

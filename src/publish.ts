@@ -113,7 +113,10 @@ function gated<T>(mountRoot: string, run: () => Promise<T>): Promise<T> {
  */
 function assertCommitIdentity(mountRoot: string): void {
 	for (const variable of ["GIT_AUTHOR_IDENT", "GIT_COMMITTER_IDENT"]) {
-		const ident = runGit(mountRoot, ["var", variable]);
+		// useConfigOnly: Git must not guess a name from the account and an
+		// e-mail from the host name (it does on a workstation); only a
+		// configured or explicitly passed identity counts.
+		const ident = runGit(mountRoot, ["-c", "user.useConfigOnly=true", "var", variable]);
 		if (ident.status === 0) continue;
 		const detail = ident.stderr.trim().split("\n").filter(Boolean).at(-1) ?? "";
 		throw new RepositoryDbError(
@@ -130,7 +133,7 @@ function assertCommitIdentity(mountRoot: string): void {
  * as `Name <email>` — the identity the commit is made with anyway.
  */
 function identityActor(mountRoot: string): string {
-	const ident = runGitOrThrow(mountRoot, ["var", "GIT_AUTHOR_IDENT"]).trim();
+	const ident = runGitOrThrow(mountRoot, ["-c", "user.useConfigOnly=true", "var", "GIT_AUTHOR_IDENT"]).trim();
 	return ident.replace(/\s+\d+\s+[+-]\d{4}$/, "");
 }
 
@@ -634,7 +637,7 @@ export async function publish(
 					entities: options.entities,
 				},
 			);
-			runGitOrThrow(mountRoot, ["commit", "--message", message]);
+			runGitOrThrow(mountRoot, ["-c", "user.useConfigOnly=true", "commit", "--message", message]);
 		} catch (error) {
 			// No commit was made, so the draft is still the working tree. Put the
 			// index back to HEAD (a mixed reset never touches the working tree);
