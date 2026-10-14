@@ -100,6 +100,27 @@ function gated<T>(mountRoot: string, run: () => Promise<T>): Promise<T> {
 	return run().finally(release);
 }
 
+/**
+ * Commits made here need an author and a committer; a send that replays a
+ * waiting commit onto a colleague's work needs a committer too. Ask Git the
+ * same question `git commit` asks, before anything is materialized, staged or
+ * replayed, so a missing identity refuses cleanly instead of failing halfway.
+ * The engine never invents an identity; the Environment provides one.
+ */
+function assertCommitIdentity(mountRoot: string): void {
+	for (const variable of ["GIT_AUTHOR_IDENT", "GIT_COMMITTER_IDENT"]) {
+		const ident = runGit(mountRoot, ["var", variable]);
+		if (ident.status === 0) continue;
+		const detail = ident.stderr.trim().split("\n").filter(Boolean).at(-1) ?? "";
+		throw new RepositoryDbError(
+			"identity_missing",
+			`This Environment has no Git name and e-mail, so the changes cannot be published. Sign in to GitHub in the Launchpad to set them, then publish again. Nothing was changed.${
+				detail ? ` Detail: ${detail}` : ""
+			}`,
+		);
+	}
+}
+
 type LaneConflictDetail = {
 	path: string;
 	unresolvedFields?: string[];
@@ -435,6 +456,7 @@ export async function publish(
 			}
 			return { state: "nothing_to_publish" };
 		}
+		assertCommitIdentity(mountRoot);
 
 		if (!options.skipMaterialize) materializeGenerated(mountRoot, config);
 		assertDeclaredGeneratedOnly(mountRoot, config);
@@ -444,32 +466,40 @@ export async function publish(
 		assertUnsentGeneratedDeclared(mountRoot, config);
 
 		const dirtyPaths = engineDirFree(gitDirtyPaths(mountRoot));
-		runGitOrThrow(mountRoot, ["add", "--all"]);
-		// The engine layer (lock, conflict and provenance files) is runtime
-		// state. It never ships, whatever the checkout's ignore rules say; a
-		// lock tracked by an old engine version leaves the index here.
-		runGitOrThrow(mountRoot, ["rm", "-r", "--cached", "--quiet", "--ignore-unmatch", "--", ENGINE_DIR]);
-		const staged = runGitOrThrow(mountRoot, ["diff", "--cached", "--name-only"])
-			.split("\n")
-			.filter(Boolean);
-		if (staged.length === 0) return { state: "nothing_to_publish" };
-
 		const changeId = newChangeId();
-		const message = buildCommitMessage(
-			options.summary?.trim() || defaultSubject(config, dirtyPaths, options.entities),
-			{
-				app: config.app,
-				dataRepo: config.dataRepo.remote,
-				branch: config.dataRepo.branch,
-				schemaVersion: `${config.schema.name}@${config.schema.version}`,
-				actor: options.actor,
-				machine: os.hostname(),
-				source: options.source,
-				changeId,
-				entities: options.entities,
-			},
-		);
-		runGitOrThrow(mountRoot, ["commit", "--message", message]);
+		try {
+			runGitOrThrow(mountRoot, ["add", "--all"]);
+			// The engine layer (lock, conflict and provenance files) is runtime
+			// state. It never ships, whatever the checkout's ignore rules say; a
+			// lock tracked by an old engine version leaves the index here.
+			runGitOrThrow(mountRoot, ["rm", "-r", "--cached", "--quiet", "--ignore-unmatch", "--", ENGINE_DIR]);
+			const staged = runGitOrThrow(mountRoot, ["diff", "--cached", "--name-only"])
+				.split("\n")
+				.filter(Boolean);
+			if (staged.length === 0) return { state: "nothing_to_publish" };
+
+			const message = buildCommitMessage(
+				options.summary?.trim() || defaultSubject(config, dirtyPaths, options.entities),
+				{
+					app: config.app,
+					dataRepo: config.dataRepo.remote,
+					branch: config.dataRepo.branch,
+					schemaVersion: `${config.schema.name}@${config.schema.version}`,
+					actor: options.actor,
+					machine: os.hostname(),
+					source: options.source,
+					changeId,
+					entities: options.entities,
+				},
+			);
+			runGitOrThrow(mountRoot, ["commit", "--message", message]);
+		} catch (error) {
+			// No commit was made, so the draft is still the working tree. Put the
+			// index back to HEAD (a mixed reset never touches the working tree);
+			// nothing publish staged is left behind.
+			runGit(mountRoot, ["reset", "--quiet"]);
+			throw error;
+		}
 
 		const { remoteChanges } = await send(mountRoot, config, "publish");
 		return {
@@ -518,6 +548,7 @@ export async function finishSend(
 			);
 		}
 		assertUnsentGeneratedDeclared(mountRoot, config);
+		assertCommitIdentity(mountRoot);
 		const { pushed, remoteChanges } = await send(mountRoot, config, "finish-send");
 		if (!pushed) return { state: "nothing_to_publish", remoteChanges };
 		return {
@@ -583,6 +614,7 @@ export async function retryConflictSend(
 			);
 		}
 		assertUnsentGeneratedDeclared(mountRoot, config);
+		assertCommitIdentity(mountRoot);
 		const { pushed, remoteChanges } = await send(mountRoot, config, "finish-send");
 		clearRecordedConflictState(mountRoot);
 		if (!pushed) return { state: "nothing_to_publish", remoteChanges };
