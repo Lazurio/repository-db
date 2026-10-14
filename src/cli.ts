@@ -16,7 +16,7 @@ Usage:
   repository-db generate [--mount <path>] [--force] [--json]
   repository-db sync     [--mount <path>] [--pull] [--json]
   repository-db publish  [--mount <path>] --revision <draft-revision>
-                         --actor <actor> --source <source>
+                         [--actor <actor>] --source <source>
                          [--summary <text>] [--entity <id>]... [--json]
   repository-db finish-send [--mount <path>] --head <sha> [--json]
   repository-db review   [--mount <path>] [--json] [--inputs]
@@ -214,7 +214,7 @@ async function main(argv: string[]): Promise<number> {
 		case "publish": {
 			const db = RepositoryDb.open(mountPath(args));
 			const result = await db.publish({
-				actor: requireFlag(args, "actor"),
+				actor: typeof args.flags.get("actor") === "string" ? (args.flags.get("actor") as string) : undefined,
 				source: requireFlag(args, "source"),
 				summary:
 					typeof args.flags.get("summary") === "string"

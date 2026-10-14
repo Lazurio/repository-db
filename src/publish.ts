@@ -125,6 +125,15 @@ function assertCommitIdentity(mountRoot: string): void {
 	}
 }
 
+/**
+ * The actor recorded when the caller names none: the Environment's Git author,
+ * as `Name <email>` — the identity the commit is made with anyway.
+ */
+function identityActor(mountRoot: string): string {
+	const ident = runGitOrThrow(mountRoot, ["var", "GIT_AUTHOR_IDENT"]).trim();
+	return ident.replace(/\s+\d+\s+[+-]\d{4}$/, "");
+}
+
 /** Derived output first, then the validators that may read it; both in the live checkout. */
 async function verifyLiveCheckout(mountRoot: string, config: RepositoryDbConfig): Promise<void> {
 	await ensureGenerated(mountRoot, config);
@@ -541,7 +550,7 @@ export async function publish(
 	config: RepositoryDbConfig,
 	options: PublishOptions,
 ): Promise<PublishResult> {
-	requireText(options.actor, "publish requires an actor");
+	if (options.actor !== undefined) requireText(options.actor, "publish requires a non-empty actor when one is given");
 	requireText(options.source, "publish requires a source");
 	requireText(
 		options.expectedRevision,
@@ -572,6 +581,7 @@ export async function publish(
 			return { state: "nothing_to_publish" };
 		}
 		assertCommitIdentity(mountRoot);
+		const actor = options.actor ?? identityActor(mountRoot);
 
 		// Materializers and validators read the checkout; they must not change
 		// what is about to be committed. Nothing is staged yet, and whatever they
@@ -617,7 +627,7 @@ export async function publish(
 					dataRepo: config.dataRepo.remote,
 					branch: config.dataRepo.branch,
 					schemaVersion: `${config.schema.name}@${config.schema.version}`,
-					actor: options.actor,
+					actor,
 					machine: os.hostname(),
 					source: options.source,
 					changeId,

@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- **Sync host gaps found by the first consumer.**
+  - `host.read(fn)` runs a read without the mutation queue and drops the
+    cached facade when the read meets a checkout that is no longer what was
+    opened (`config_changed`, `boundary_violation`, `config_missing`), so the
+    next call opens it again. `host.db()` stays for synchronous code.
+  - `createSyncHost({ recordOf })` maps changed paths to records for
+    `remote-pulled`; it receives the engine's Collection-layout answer
+    (`<data>/<collection>/<id>.yaml`) and returns it, another record, or `null`.
+    Without it, only Collection files are named, as before. A `recordOf` that
+    throws falls back to that answer and emits an `error` event; it never fails
+    the pull or send. `records` are now listed in path order.
+  - `publish` records the Environment's Git author (`Name <email>`) as the actor
+    when none is given; `PublishOptions.actor` and the CLI `--actor` are
+    optional. An explicit actor still wins; an explicitly empty one is refused.
+
 - **One sync path: derived output is an ignored cache, validation runs in the
   live checkout, and the engine owns the host loop** (#16). Two people changing
   different records now both publish, a pull comes in under a draft of other
