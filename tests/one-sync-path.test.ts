@@ -226,6 +226,71 @@ describe("materializers and validators run in the live checkout", () => {
 		expect(remoteFiles(fixture)).toContain("data/things/second.yaml");
 	});
 
+	test("a retried conflict whose push then fails keeps the checkout on the recorded commit, so the next retry works", async () => {
+		const { fixture, a, b } = setup();
+		const dbA = RepositoryDb.open(a);
+		const dbB = RepositoryDb.open(b);
+		writeFixtureDocument(a, "first", { code: "DUP" });
+		await publishAll(dbA);
+		writeFixtureDocument(b, "second", { code: "DUP" });
+		await errorOf(() => publishAll(dbB));
+		const pending = dbB.conflict()?.pendingHead as string;
+
+		writeFixtureDocument(a, "first", { code: "UNIQUE" });
+		await publishAll(dbA);
+		// The integration now validates, but the remote refuses the push.
+		const marker = path.join(fixture.root, "reject-push");
+		const hook = path.join(fixture.originPath, "hooks", "pre-receive");
+		writeFileSync(hook, `#!/bin/sh\nif [ -f '${marker}' ]; then echo refused >&2; exit 1; fi\n`, "utf8");
+		chmodSync(hook, 0o755);
+		writeFileSync(marker, "", "utf8");
+
+		const refused = await errorOf(() => dbB.finishSend({ expectedHead: pending }));
+		expect(refused.code).toBe("publish_push_failed");
+		expect(git(b, ["rev-parse", "HEAD"]).trim()).toBe(pending);
+		expect(dbB.conflict()?.pendingHead).toBe(pending);
+		expect(dbB.status().dirtyPaths).toEqual([]);
+
+		rmSync(marker);
+		expect((await dbB.finishSend({ expectedHead: pending })).state).toBe("published");
+		expect(dbB.conflict()).toBeUndefined();
+	});
+
+	test("a materializer that changes tracked files on the integrated result is undone and recorded, nothing is pushed", async () => {
+		const { fixture, a, b } = setup();
+		// A materializer that misbehaves only on content a colleague brings in.
+		writeFileSync(
+			path.join(a, "scripts/materialize.sh"),
+			[
+				"set -e",
+				"if [ -f data/things/trigger.yaml ]; then echo touched > data/things/touched.yaml; fi",
+				`mkdir -p ${DERIVED_PATH}`,
+				`ls data/things | grep '\\.yaml$' | sort > ${DERIVED_FILE}`,
+				"",
+			].join("\n"),
+			"utf8",
+		);
+		git(a, ["add", "--all"]);
+		git(a, ["commit", "--message", "materializer with a side effect"]);
+		git(a, ["push", "--quiet", "origin", fixture.branch]);
+		const dbB = RepositoryDb.open(b);
+		await dbB.pull();
+		writeFixtureDocument(a, "trigger", { code: "T" });
+		git(a, ["add", "--all"]);
+		git(a, ["commit", "--message", "colleague record, pushed with plain Git"]);
+		git(a, ["push", "--quiet", "origin", fixture.branch]);
+		const remoteBefore = git(fixture.originPath, ["rev-parse", fixture.branch]).trim();
+
+		writeFixtureDocument(b, "mine", { code: "M" });
+		const refused = await errorOf(() => publishAll(dbB));
+		expect(refused.code).toBe("publish_conflict");
+		expect(dbB.conflict()?.kind).toBe("validation");
+		expect(dbB.conflict()?.message).toContain("changed tracked files (data/things/touched.yaml)");
+		expect(existsSync(path.join(b, "data/things/touched.yaml"))).toBe(false);
+		expect(dbB.status().dirtyPaths).toEqual([]);
+		expect(git(fixture.originPath, ["rev-parse", fixture.branch]).trim()).toBe(remoteBefore);
+	});
+
 	test("a push the remote moved under is integrated again and sent", async () => {
 		const { fixture, a, b } = setup();
 		const dbB = RepositoryDb.open(b);

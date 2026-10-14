@@ -329,12 +329,41 @@ function recordSendConflict(
 async function fetchForSend(mountRoot: string): Promise<void> {
 	try {
 		await gitFetchAsync(mountRoot);
+	} catch {
+		// Once more after a moment: another fetch in this repository (a host's
+		// background check, an agent's CLI) can hold the ref lock briefly.
+		await new Promise((resolve) => setTimeout(resolve, 500));
+		await retryFetch(mountRoot);
+	}
+}
+
+async function retryFetch(mountRoot: string): Promise<void> {
+	try {
+		await gitFetchAsync(mountRoot);
 	} catch (error) {
 		throw new RepositoryDbError(
 			"publish_push_failed",
 			`Could not reach the remote; the commit stays waiting to be sent (committed_not_pushed). Detail: ${(error as Error).message}`,
 		);
 	}
+}
+
+/**
+ * Undo what the data repo's commands changed in tracked files. A send starts
+ * from a committed checkout, so every path that became dirty while they ran is
+ * theirs; paths dirty before are left alone. Returns the paths it restored.
+ */
+function restoreCommandSideEffects(mountRoot: string, before: ReadonlySet<string>): string[] {
+	const touched = engineDirFree(gitDirtyPaths(mountRoot)).filter((entry) => !before.has(entry));
+	for (const entry of touched) {
+		const inHead = runGit(mountRoot, ["cat-file", "-e", `HEAD:${entry}`]).status === 0;
+		if (inHead) runGitOrThrow(mountRoot, ["checkout", "HEAD", "--", entry]);
+		else {
+			runGit(mountRoot, ["rm", "--cached", "--quiet", "--ignore-unmatch", "--", entry]);
+			rmSync(path.join(mountRoot, entry), { force: true, recursive: true });
+		}
+	}
+	return touched;
 }
 
 function remoteHeadOf(mountRoot: string, branch: string): string {
@@ -396,20 +425,33 @@ async function send(
 						),
 					});
 				}
+				const dirtyBefore = new Set(engineDirFree(gitDirtyPaths(mountRoot)));
 				// --keep, not --hard: if anything unexpected sits in the working tree,
 				// Git refuses instead of erasing it.
 				runGitOrThrow(mountRoot, ["reset", "--keep", lane.head]);
+				let failure: string | undefined;
 				try {
 					await verifyLiveCheckout(mountRoot, config);
 				} catch (error) {
-					runGitOrThrow(mountRoot, ["reset", "--keep", pending]);
 					if (!(error instanceof MaterializeFailedError || error instanceof ValidationFailedError)) {
+						restoreCommandSideEffects(mountRoot, dirtyBefore);
+						runGitOrThrow(mountRoot, ["reset", "--keep", pending]);
 						throw error;
 					}
+					failure = error.message.split("\n")[0];
+				}
+				// The commands must not change tracked files; what they changed is
+				// put back before anything moves, so nothing unreviewed is left.
+				const sideEffects = restoreCommandSideEffects(mountRoot, dirtyBefore);
+				if (!failure && sideEffects.length > 0) {
+					failure = `materializers or validators changed tracked files (${sideEffects.join(", ")}); they may write only to declared generated_manifest paths`;
+				}
+				if (failure) {
+					runGitOrThrow(mountRoot, ["reset", "--keep", pending]);
 					recordSendConflict(mountRoot, config, operation, pending, {
 						kind: "validation",
 						gitState: "integrated result failed validation",
-						message: `${operation} stopped: the local changes on top of the colleagues' newer work failed validation; nothing was sent. ${error.message.split("\n")[0]}`,
+						message: `${operation} stopped: the local changes on top of the colleagues' newer work failed validation; nothing was sent. ${failure}`,
 						paths: incoming,
 					});
 				}
@@ -434,6 +476,10 @@ async function send(
 				continue;
 			}
 		}
+		// Back to the confirmed commit: the integration is redone on the next
+		// attempt, and a recorded conflict keeps naming the commit it was for.
+		const now = gitHeadCommit(mountRoot);
+		if (localHead && now !== localHead) runGitOrThrow(mountRoot, ["reset", "--keep", localHead]);
 		throw new RepositoryDbError(
 			"publish_push_failed",
 			`git push failed; the commit stays waiting to be sent (committed_not_pushed). Finish the send to retry. Detail: ${

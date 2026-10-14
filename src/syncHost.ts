@@ -23,9 +23,9 @@ import {
  *     derived from (`deriveDraftPanel`);
  *   - events, `subscribe(listener)`: `status`, `remote-pulled` (with the
  *     changed paths), `conflict` and `error`;
- *   - a background check every `intervalMs`: fetch, then fast-forward to
- *     colleagues' work whenever the engine allows it — also under a draft of
- *     other records;
+ *   - a background check every `intervalMs`, in the same queue: fetch, then
+ *     fast-forward to colleagues' work whenever the engine allows it — also
+ *     under a draft of other records;
  *   - recovery: a checkout that does not exist yet (or vanished) is opened
  *     again on every check; a failed open is never cached.
  *
@@ -106,6 +106,8 @@ export interface SyncHost {
 }
 
 const DEFAULT_INTERVAL_MS = 30_000;
+/** Deadline of the background fetch, which runs in the mutation queue. */
+const FETCH_TIMEOUT_MS = 20_000;
 
 /** One queue per checkout across every host in this process (a dev server may build two). */
 const queues = new Map<string, Promise<void>>();
@@ -235,7 +237,16 @@ export function createSyncHost(options: SyncHostOptions): SyncHost {
 		try {
 			const db = open();
 			const sync = db.status();
-			if (sync.behind === 0) pullBlocked = null;
+			// A refused pull stays reported only while the draft still changes
+			// one of the records that stood in the way (or Git itself refused).
+			if (
+				sync.behind === 0 ||
+				(pullBlocked &&
+					pullBlocked.paths.length > 0 &&
+					!pullBlocked.paths.some((entry) => sync.dirtyPaths.includes(entry)))
+			) {
+				pullBlocked = null;
+			}
 			next = {
 				mountRoot,
 				available: true,
@@ -311,14 +322,17 @@ export function createSyncHost(options: SyncHostOptions): SyncHost {
 		} catch {
 			return publishStatus();
 		}
-		try {
-			await gitFetchAsync(db.mountRoot);
-			fetchError = null;
-		} catch (error) {
-			forgetIfGone(error);
-			fetchError = problemOf(error);
-		}
+		// In the queue: a fetch running beside a publish's own fetch or push can
+		// collide on Git's ref locks. A short deadline keeps a hung network from
+		// holding writes back for long.
 		return enqueue(mountRoot, async () => {
+			try {
+				await gitFetchAsync(db.mountRoot, FETCH_TIMEOUT_MS);
+				fetchError = null;
+			} catch (error) {
+				forgetIfGone(error);
+				fetchError = problemOf(error);
+			}
 			let pulled: PullResult | undefined;
 			try {
 				const sync = db.status();

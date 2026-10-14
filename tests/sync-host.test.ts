@@ -91,6 +91,17 @@ describe("host sync service", () => {
 		expect(status.pullBlocked?.paths).toEqual(["data/things/shared.yaml"]);
 		expect(events.some((event) => event.type === "remote-pulled")).toBe(false);
 		expect(readFileSync(path.join(b, "data/things/shared.yaml"), "utf8")).toContain("x: 3");
+
+		// Reverting that record lifts the block at once, and the next check pulls.
+		await service.run("discard", (db) =>
+			db.discard({
+				scope: { kind: "record", path: "data/things/shared.yaml" },
+				expectedRevision: db.draftRevision(),
+			}),
+		);
+		expect(service.status().pullBlocked).toBeNull();
+		expect((await service.refresh()).sync?.behind).toBe(0);
+		expect(readFileSync(path.join(b, "data/things/shared.yaml"), "utf8")).toContain("x: 2");
 	});
 
 	test("mutations run one after another, also across two hosts of the same checkout", async () => {
