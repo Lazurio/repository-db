@@ -110,13 +110,22 @@ function runCommand(command: string, mountRoot: string): Promise<CommandOutcome>
  * (the engine refuses to publish until it is done).
  */
 export function assertDerivedOutputIgnored(mountRoot: string, config: RepositoryDbConfig): void {
+	const problem = derivedOutputProblem(mountRoot, config);
+	if (problem) throw problem;
+}
+
+/** {@link assertDerivedOutputIgnored} as a value: the refusal, or `undefined`. */
+export function derivedOutputProblem(
+	mountRoot: string,
+	config: RepositoryDbConfig,
+): TrackedDerivedOutputError | undefined {
 	const engineTracked = runGit(mountRoot, ["ls-files", "-z", "--", ENGINE_DIR])
 		.stdout.split("\0")
 		.filter(Boolean);
 	if (engineTracked.length > 0) {
-		throw new TrackedDerivedOutputError(
+		return new TrackedDerivedOutputError(
 			"engine_state_tracked",
-			`The data checkout tracks repository-db runtime files (${engineTracked.join(", ")}), left by an older repository-db. Clean the checkout before using this version: git rm -r --cached -- ${ENGINE_DIR}, add "/${ENGINE_DIR}/" to .gitignore, then commit and push that as an ordinary data commit.`,
+			`The data checkout tracks repository-db runtime files (${engineTracked.join(", ")}), left by an older repository-db. Clean the checkout before using this version: git rm -r --cached -- ${ENGINE_DIR}, add "/${ENGINE_DIR}/" to .gitignore, then commit and push that as an ordinary data commit. A checkout of a data repository that is already cleaned only needs to catch up: a pull brings the cleanup in.`,
 			engineTracked,
 			[
 				`git rm -r --cached --quiet -- ${ENGINE_DIR}`,
@@ -127,7 +136,7 @@ export function assertDerivedOutputIgnored(mountRoot: string, config: Repository
 	}
 
 	const declared = config.generatedManifest.map((entry) => entry.path);
-	if (declared.length === 0) return;
+	if (declared.length === 0) return undefined;
 	const tracked = new Set(
 		runGit(mountRoot, ["ls-files", "-z", "--", ...declared]).stdout.split("\0").filter(Boolean),
 	);
@@ -148,14 +157,14 @@ export function assertDerivedOutputIgnored(mountRoot: string, config: Repository
 		(entry) => !ignored.has(entry) && !ignored.has(`${entry}/.repository-db-probe`),
 	);
 	const problems = [...new Set([...trackedEntries, ...notIgnored])];
-	if (problems.length === 0) return;
-	throw new TrackedDerivedOutputError(
+	if (problems.length === 0) return undefined;
+	return new TrackedDerivedOutputError(
 		"derived_output_tracked",
 		`Derived output must not be in Git, and this data repository still ${
 			trackedEntries.length > 0 ? "tracks" : "does not ignore"
 		} ${problems.join(", ")}. Derived output is a cache repository-db rebuilds on every Environment. Migrate the data repository once, as an ordinary data commit: git rm -r --cached --ignore-unmatch -- ${problems.join(
 			" ",
-		)}; add ${problems.map((entry) => `"/${entry}"`).join(", ")} to .gitignore; commit and push. Nothing was changed.`,
+		)}; add ${problems.map((entry) => `"/${entry}"`).join(", ")} to .gitignore; commit and push. A checkout of a data repository that is already migrated only needs to catch up: a pull brings the migration in. Nothing was changed.`,
 		problems,
 		[
 			`git rm -r --cached --quiet --ignore-unmatch -- ${problems.join(" ")}`,

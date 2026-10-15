@@ -3,7 +3,9 @@ import path from "node:path";
 import { initDataRepo } from "./init.ts";
 import { RepositoryDb } from "./repositoryDb.ts";
 import type { DraftOriginKind } from "./origin.ts";
-import { RepositoryDbError } from "./types.ts";
+import { loadRepositoryDbConfig } from "./config.ts";
+import { type PullResult, pullRemote } from "./publish.ts";
+import { RepositoryDbError, TrackedDerivedOutputError } from "./types.ts";
 
 const HELP = `repository-db — Git-backed YAML data layer
 
@@ -185,10 +187,18 @@ async function main(argv: string[]): Promise<number> {
 			return 0;
 		}
 		case "sync": {
-			const db = RepositoryDb.open(mountPath(args));
 			if (args.flags.get("pull") === true) {
-				const pulled = await db.pull();
-				const status = db.status();
+				const mount = path.resolve(mountPath(args));
+				let pulled: PullResult;
+				try {
+					pulled = await RepositoryDb.open(mount).pull();
+				} catch (error) {
+					// A checkout cloned before the data repository was migrated
+					// catches up to the migration; pullRemote refuses anything else.
+					if (!(error instanceof TrackedDerivedOutputError)) throw error;
+					pulled = await pullRemote(mount, loadRepositoryDbConfig(mount));
+				}
+				const status = RepositoryDb.open(mount).status();
 				emit(args, { pulled, status }, () =>
 					[
 						pulled.state === "pulled"
@@ -199,6 +209,7 @@ async function main(argv: string[]): Promise<number> {
 				);
 				return 0;
 			}
+			const db = RepositoryDb.open(mountPath(args));
 			const status = await db.statusAsync({ fetch: true });
 			emit(args, status, () =>
 				[

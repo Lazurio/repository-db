@@ -186,6 +186,15 @@ git add .gitignore && git commit -m "Derived output is an ignored cache built by
 Do this as the data-repo PR of [`migrating-a-module.md`](migrating-a-module.md),
 not ad hoc on a live checkout.
 
+**A checkout cloned before the migration** reports the same code once the data
+repository is already migrated. It only needs the migrating commit: a pull
+accepts a checkout that tracks derived output when the published tip no longer
+tracks those paths. The sync host does this on its next check
+(`autoPull`, the default); by hand it is `repository-db sync --pull`. A stale
+copy of the cache is set back before the fast-forward and rebuilt afterwards;
+a data draft stays, under the ordinary pull rule. A published tip that still
+tracks the paths is refused with the migration, as before.
+
 ## Smaller refusals
 
 | Code | Way out |
