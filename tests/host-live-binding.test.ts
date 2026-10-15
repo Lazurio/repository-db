@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { RepositoryDb } from "../src/repositoryDb.ts";
 import { type SyncHost, type SyncHostEvent, type SyncHostOptions, createSyncHost } from "../src/syncHost.ts";
@@ -277,5 +277,60 @@ describe("a host bound to the data repository the app expects", () => {
 		// Reopened, the checkout no longer matches what the app expects.
 		await expect(host.read(() => (ran = true))).rejects.toMatchObject({ code: "boundary_violation" });
 		expect(ran).toBe(false);
+	});
+});
+
+describe("expect.within keeps a host inside the app's module", () => {
+	test("a mount that links to a checkout outside the module is refused; nothing is fetched or pulled", async () => {
+		const { fixture, a, b } = setup();
+		const moduleRoot = path.join(fixture.root, "module");
+		mkdirSync(moduleRoot, { recursive: true });
+		const mount = path.join(moduleRoot, "db");
+		symlinkSync(b, mount);
+		const { host } = track({
+			mountRoot: mount,
+			expect: { remote: fixture.originPath, branch: fixture.branch, within: moduleRoot },
+		});
+		await colleaguePublishes(a, "theirs");
+		const head = git(b, ["rev-parse", "HEAD"]).trim();
+		const tracking = git(b, ["rev-parse", `origin/${fixture.branch}`]).trim();
+
+		const status = await host.refresh();
+		expect(status.available).toBe(false);
+		expect(status.error?.code).toBe("boundary_violation");
+		await expect(host.read((db) => db.status())).rejects.toMatchObject({ code: "boundary_violation" });
+		await expect(host.run("pull", (db) => db.pull())).rejects.toMatchObject({ code: "boundary_violation" });
+		expect(git(b, ["rev-parse", "HEAD"]).trim()).toBe(head);
+		expect(git(b, ["rev-parse", `origin/${fixture.branch}`]).trim()).toBe(tracking);
+	});
+
+	test("a mount swapped for a link after a good open is refused before the next read", async () => {
+		const { fixture, b } = setup();
+		const moduleRoot = path.join(fixture.root, "module");
+		mkdirSync(moduleRoot, { recursive: true });
+		const mount = path.join(moduleRoot, "db");
+		git(fixture.root, ["clone", "--quiet", "--branch", fixture.branch, fixture.originPath, mount]);
+		const { host } = track({
+			mountRoot: mount,
+			expect: { remote: fixture.originPath, branch: fixture.branch, within: moduleRoot },
+		});
+		expect((await host.refresh()).available).toBe(true);
+		renameSync(mount, path.join(fixture.root, "moved-away"));
+		symlinkSync(b, mount);
+		await expect(host.read((db) => db.status())).rejects.toMatchObject({ code: "boundary_violation" });
+	});
+
+	test("a real checkout inside the module is served", async () => {
+		const { fixture } = setup();
+		const moduleRoot = path.join(fixture.root, "module");
+		mkdirSync(moduleRoot, { recursive: true });
+		const mount = path.join(moduleRoot, "db");
+		git(fixture.root, ["clone", "--quiet", "--branch", fixture.branch, fixture.originPath, mount]);
+		const { host } = track({
+			mountRoot: mount,
+			expect: { remote: fixture.originPath, branch: fixture.branch, within: moduleRoot },
+		});
+		expect((await host.refresh()).available).toBe(true);
+		expect(await host.read((db) => db.config.app)).toBe("fixture");
 	});
 });
