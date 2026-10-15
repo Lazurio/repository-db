@@ -76,7 +76,7 @@ or validator of the data repo. Or such a command changed tracked files; it is
 put back. The checkout is back on your commit, and nothing was pushed.
 
 ```bash
-repository-db conflict              # message names the failing command
+repository-db conflict              # the failing command and its own output (first 20 lines)
 repository-db validate              # reproduce locally (builds derived output first)
 ```
 
@@ -197,6 +197,8 @@ not ad hoc on a live checkout.
 | `materialize_failed` / `validation_failed` | Fix the data or the data-repo command, then `repository-db validate`. |
 | `generated_side_effect` | A materializer or validator changed tracked files; fix it to write only declared paths. |
 | `credentials` | Sign in (`gh auth login`), or configure the Environment's credential helper / deploy key (a key in `~/.ssh/config` is accepted when `git ls-remote` reaches the remote non-interactively). |
+| `symlink_refused` | A record path goes through a symbolic link (`data/`, a collection or nested directory, or the file). Nothing was read or written. Replace the link with a real directory or file inside the data checkout (`git -C <module>/db status` shows it as a change). |
+| `boundary_violation` (push diverted) | A push to `origin` would go elsewhere than `data_repo.remote`: `remote.origin.pushurl`, or a `url.*.pushInsteadOf` / `insteadOf` rewrite in the checkout's, global or system Git config. Nothing was committed or pushed. Check with `git -C <module>/db remote get-url --push --all origin`, then remove the override (`git -C <module>/db config --unset-all remote.origin.pushurl`, or the `url.*` entry wherever `git config --show-origin --get-regexp '^url\.'` lists it) and publish again. |
 | `boundary_violation` | Run the command against the data checkout itself, on its branch, with the right `origin`. In an app, the checkout may also be a different data repository than the one the app serves (`expect`), or a link resolving outside the module (`expect.within`): replace the mount with a real checkout of the app's data repository inside the module. |
 | `revert_not_supported` | Discard the whole draft instead (`repository-db discard --draft`), or change the record by an ordinary edit. |
 | `unpushed_commit` | Finish the waiting send before discarding. |

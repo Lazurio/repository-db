@@ -1,5 +1,33 @@
 # Changelog
 
+## 3.2.5 — 2026-10-15
+
+- **A publish goes only to `data_repo.remote`** (#32). The boundary guard also
+  compares every effective push URL of `origin` (`git remote get-url --push
+  --all origin`, which applies `remote.origin.pushurl` and `url.*.pushInsteadOf`
+  / `insteadOf` from any config level) with `data_repo.remote`; a mismatch is
+  `boundary_violation` before anything is committed or pushed. A send checks
+  the push target again right before every push, so a rewrite added meanwhile
+  in the global or system config is caught too.
+- **A validation conflict keeps the validator's explanation** (#33). The
+  integrated result's failure keeps the command and its own output, bounded to
+  the first 20 lines / 4 KB, in the conflict message and the `publish_conflict`
+  error. The same bound now applies to a live `validation_failed` and
+  `materialize_failed`, which report the command's own output instead of
+  repeating it after Node's "Command failed" line.
+- **Record files only through real directories inside the checkout.**
+  `writeRecordDraft` and `Collection` (`get`, `has`, `list`, `listIds`,
+  `revision`, `put`, `remove`) refuse a path outside the data checkout
+  (`boundary_violation`). They also refuse one with a symbolic link anywhere
+  below the mount root: `data/`, a collection or nested directory, or the file.
+  Each component is `lstat`ed, and the final read opens with `O_NOFOLLOW`
+  (`symlink_refused`). Nothing is read from, or created, outside. New exports
+  for apps that touch files themselves: `readDataFile(mountRoot,
+  relativePath): string | null` and `assertDataPath(mountRoot, path): string`.
+- Conflict handoffs name no host paths: the conflict record is
+  `.repository-db/conflict.json` in the data checkout, and Git's messages about
+  the throwaway integration lane say `<integration lane>`.
+
 ## 3.2.4 — 2026-10-15
 
 - **`expect.within`.** `createSyncHost({ expect: { remote, branch, within } })`

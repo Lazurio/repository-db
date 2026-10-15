@@ -1,0 +1,4 @@
+[test]
+# Integration tests drive real Git repositories with two or three clones; on a
+# loaded machine one test can take several seconds.
+timeout = 30000

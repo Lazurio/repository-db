@@ -1,14 +1,16 @@
 import { createHash } from "node:crypto";
 import {
 	existsSync,
+	lstatSync,
 	readFileSync,
 	readdirSync,
 	rmSync,
 } from "node:fs";
 import path from "node:path";
 import { assertNoActiveConflict } from "./conflict.ts";
+import { assertDataPath, readDataBytes } from "./dataPath.ts";
 import { withDraftWriteLock } from "./lock.ts";
-import { readYamlFile, writeYamlFileAtomic } from "./yamlIo.ts";
+import { parseYaml, writeYamlFileAtomic } from "./yamlIo.ts";
 import {
 	type DocumentParser,
 	RecordChangedError,
@@ -91,11 +93,13 @@ export function writeRecordDraft<T>(
 	options: RecordWriteOptions,
 	write: () => T,
 ): T {
+	assertDataPath(mountRoot, filePath);
 	assertNoActiveConflict(mountRoot);
 	return withDraftWriteLock(mountRoot, () => {
 		// Re-checked under the gate: a publish can record a conflict and
 		// release the lock between the check above and this write.
 		assertNoActiveConflict(mountRoot);
+		assertDataPath(mountRoot, filePath);
 		if (options.baseRevision !== undefined) {
 			const current = recordRevision(filePath);
 			if (current !== options.baseRevision) {
@@ -147,21 +151,25 @@ export class Collection<T> {
 	}
 
 	listIds(): string[] {
+		// Only through real directories inside the checkout, and only real files.
+		assertDataPath(this.mountRoot, this.directory);
 		if (!existsSync(this.directory)) return [];
-		return readdirSync(this.directory)
-			.filter((file) => file.endsWith(".yaml"))
+		const files = readdirSync(this.directory).filter((file) => file.endsWith(".yaml"));
+		for (const file of files) assertDataPath(this.mountRoot, path.join(this.directory, file));
+		return files
 			.map((file) => decodeURIComponent(file.slice(0, -".yaml".length)))
 			.sort((a, b) => a.localeCompare(b, "en"));
 	}
 
 	has(id: string): boolean {
-		return existsSync(path.join(this.directory, documentFileName(id)));
+		const filePath = assertDataPath(this.mountRoot, path.join(this.directory, documentFileName(id)));
+		return lstatSync(filePath, { throwIfNoEntry: false }) !== undefined;
 	}
 
 	get(id: string): CollectionDocument<T> | undefined {
-		const filePath = path.join(this.directory, documentFileName(id));
-		if (!existsSync(filePath)) return undefined;
-		return this.parseEnvelope(readYamlFile(filePath), id);
+		const bytes = readDataBytes(this.mountRoot, path.join(this.directory, documentFileName(id)));
+		if (bytes === null) return undefined;
+		return this.parseEnvelope(parseYaml(bytes.toString("utf8")), id);
 	}
 
 	getOrThrow(id: string): CollectionDocument<T> {
@@ -182,7 +190,8 @@ export class Collection<T> {
 
 	/** Revision of one document as stored, `null` when it does not exist. */
 	revision(id: string): string | null {
-		return recordRevision(path.join(this.directory, documentFileName(id)));
+		const bytes = readDataBytes(this.mountRoot, path.join(this.directory, documentFileName(id)));
+		return bytes === null ? null : recordRevisionFromBytes(bytes);
 	}
 
 	/**

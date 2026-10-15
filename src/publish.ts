@@ -1,7 +1,7 @@
-import { lstatSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { assertDataRepoBoundary } from "./boundary.ts";
+import { assertDataRepoBoundary, assertPushTarget } from "./boundary.ts";
 import {
 	activeConflict,
 	assertNoActiveConflict,
@@ -257,6 +257,11 @@ async function rebaseInLane(
 ): Promise<LaneResult> {
 	const parent = mkdtempSync(path.join(os.tmpdir(), "repository-db-lane-"));
 	const laneRoot = path.join(parent, "lane");
+	// Git names the throwaway lane in its messages; that host path means
+	// nothing to the person reading the conflict, so it is left out.
+	const lanePaths = [...new Set([realpathSync(parent), parent])];
+	const laneDetail = (text: string) =>
+		lanePaths.reduce((current, lanePath) => current.split(lanePath).join("<integration lane>"), text);
 	try {
 		runGitOrThrow(mountRoot, ["worktree", "add", "--detach", laneRoot, start]);
 		let rebase = await runGitAsync(laneRoot, ["rebase", onto]);
@@ -269,7 +274,7 @@ async function rebaseInLane(
 				return {
 					ok: false,
 					paths: [],
-					detail: rebase.stderr.trim() || rebase.stdout.trim() || "rebase stopped",
+					detail: laneDetail(rebase.stderr.trim() || rebase.stdout.trim() || "rebase stopped"),
 					conflicts: [],
 				};
 			}
@@ -278,7 +283,7 @@ async function rebaseInLane(
 				return {
 					ok: false,
 					paths: unmerged,
-					detail: rebase.stderr.trim() || rebase.stdout.trim() || "rebase stopped",
+					detail: laneDetail(rebase.stderr.trim() || rebase.stdout.trim() || "rebase stopped"),
 					conflicts: semantic.conflicts,
 				};
 			}
@@ -297,7 +302,7 @@ async function rebaseInLane(
 	}
 }
 
-function conflictHandoff(mountRoot: string, branch: string, kind: ConflictKind): string {
+function conflictHandoff(branch: string, kind: ConflictKind): string {
 	return [
 		kind === "merge"
 			? "repository-db bezpečně neprokázal sloučení všech změn. Pracovní kopie zůstala beze změny."
@@ -306,7 +311,7 @@ function conflictHandoff(mountRoot: string, branch: string, kind: ConflictKind):
 		"b) Jinak repository-db conflict --abort vrátí čekající publikaci zpět do konceptu;",
 		"   vraťte dotčený záznam, stáhněte práci kolegy, změnu proveďte znovu a publikujte.",
 		`Větev ${branch} se nesmí ručně rebasovat v aktivním data mountu.`,
-		`Technický detail zůstává v ${mountRoot}/.repository-db/conflict.json.`,
+		"Technický detail zůstává v souboru .repository-db/conflict.json v datovém checkoutu.",
 		"Do té doby repository-db odmítá zápisy i publikaci.",
 	].join("\n");
 }
@@ -338,7 +343,7 @@ function recordSendConflict(
 		// The live checkout holds exactly the pending commit and no Git operation
 		// runs in it, so a later explicit retry may fetch and integrate again.
 		retryable: true,
-		handoff: conflictHandoff(mountRoot, config.dataRepo.branch, detail.kind),
+		handoff: conflictHandoff(config.dataRepo.branch, detail.kind),
 	});
 	throw new RepositoryDbError("publish_conflict", `${state.message}\n\n${state.handoff}`);
 }
@@ -492,7 +497,8 @@ async function send(
 						runGitOrThrow(mountRoot, ["reset", "--keep", pending]);
 						throw error;
 					}
-					failure = error.message.split("\n")[0];
+					// The whole (bounded) message: the command and its own explanation.
+					failure = error.message;
 				}
 				// The commands must not change tracked files; what they changed is
 				// put back before anything moves, so nothing unreviewed is left.
@@ -512,6 +518,15 @@ async function send(
 			}
 		}
 
+		// Right before the push: Git's push configuration, including global and
+		// system rewrites, could have changed since the checkout was opened.
+		try {
+			assertPushTarget(mountRoot, config);
+		} catch (error) {
+			const now = gitHeadCommit(mountRoot);
+			if (localHead && now !== localHead) runGitOrThrow(mountRoot, ["reset", "--keep", localHead]);
+			throw error;
+		}
 		const push = await runGitAsync(mountRoot, ["push", "origin", `HEAD:${branch}`]);
 		if (push.status === 0) {
 			// The draft the provenance markers described is now published.

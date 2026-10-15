@@ -19,12 +19,12 @@ function conflictPath(mountRoot: string): string {
 	return path.join(mountRoot, ENGINE_DIR, CONFLICT_FILE);
 }
 
-function cleanCheckoutHandoff(filePath: string): string {
+function cleanCheckoutHandoff(): string {
 	return [
 		"This repository-db does not undo it automatically. Clean the checkout by hand:",
 		"1. Look at `git status` and `git log @{upstream}..HEAD` in the data checkout and keep what is not published yet.",
 		"2. Bring the checkout back to a plain state on the data branch (no rebase or merge in progress).",
-		`3. Run \`repository-db conflict --resolved\`, which removes ${filePath}.`,
+		`3. Run \`repository-db conflict --resolved\`, which removes ${ENGINE_DIR}/${CONFLICT_FILE}.`,
 	].join("\n");
 }
 
@@ -54,8 +54,8 @@ export function readConflictState(mountRoot: string): ConflictState | undefined 
 		gitState: parsed?.gitState ?? "unknown",
 		message: parsed
 			? `A conflict recorded by an older repository-db is still in this checkout (${parsed.message ?? "no message"}).`
-			: `The conflict record ${filePath} is unreadable.`,
-		handoff: cleanCheckoutHandoff(filePath),
+			: `The conflict record ${ENGINE_DIR}/${CONFLICT_FILE} is unreadable.`,
+		handoff: cleanCheckoutHandoff(),
 		retryable: false,
 	};
 }

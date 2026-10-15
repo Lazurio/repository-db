@@ -44,6 +44,33 @@ function stampPath(mountRoot: string): string {
 
 type CommandOutcome = { ok: true } | { ok: false; detail: string };
 
+/** How much of a failing command's own output is kept: enough to say why. */
+const MAX_OUTPUT_LINES = 20;
+const MAX_OUTPUT_BYTES = 4096;
+
+/**
+ * The first lines of a command's output, bounded. The same bound applies to a
+ * live failure and to one after integrating a colleague's work, so both carry
+ * the command's own explanation.
+ */
+export function boundedOutput(text: string): string {
+	const lines = text.split("\n");
+	let kept = lines.slice(0, MAX_OUTPUT_LINES).join("\n");
+	let shortened = lines.length > MAX_OUTPUT_LINES;
+	if (Buffer.byteLength(kept) > MAX_OUTPUT_BYTES) {
+		kept = Buffer.from(kept).subarray(0, MAX_OUTPUT_BYTES).toString("utf8").replace(/\uFFFD$/, "");
+		shortened = true;
+	}
+	if (!shortened) return kept;
+	const marker = "\n… (output shortened)";
+	// The marker is part of the budget: the whole report stays within the cap.
+	const room = MAX_OUTPUT_BYTES - Buffer.byteLength(marker);
+	if (Buffer.byteLength(kept) > room) {
+		kept = Buffer.from(kept).subarray(0, room).toString("utf8").replace(/\uFFFD$/, "");
+	}
+	return `${kept}${marker}`;
+}
+
 /** Run one data-repo command with cwd = mount root, off the event loop. */
 function runCommand(command: string, mountRoot: string): Promise<CommandOutcome> {
 	return new Promise((resolve) => {
@@ -56,17 +83,17 @@ function runCommand(command: string, mountRoot: string): Promise<CommandOutcome>
 				killSignal: "SIGKILL",
 				maxBuffer: 64 * 1024 * 1024,
 			},
-			(error, _stdout, stderr) => {
+			(error, stdout, stderr) => {
 				if (!error) {
 					resolve({ ok: true });
 					return;
 				}
-				const detail = [error.message, String(stderr ?? "")]
-					.map((part) => part.trim())
-					.filter(Boolean)
-					.filter((part, index, all) => all.indexOf(part) === index)
-					.join("\n");
-				resolve({ ok: false, detail });
+				// The command's own words, both streams in a fixed order (stderr,
+				// then stdout); Node's message only when it said nothing (it repeats
+				// stderr after "Command failed: …").
+				const output = [String(stderr ?? "").trim(), String(stdout ?? "").trim()].filter(Boolean).join("\n");
+				const reason = error.killed ? `killed after ${COMMAND_TIMEOUT_MS / 1000} s` : `exit ${error.code ?? "?"}`;
+				resolve({ ok: false, detail: boundedOutput(output ? `${output}\n(${reason})` : error.message) });
 			},
 		);
 		// No input: a command that reads stdin gets EOF instead of waiting.
