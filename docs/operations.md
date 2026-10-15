@@ -197,7 +197,7 @@ not ad hoc on a live checkout.
 | `materialize_failed` / `validation_failed` | Fix the data or the data-repo command, then `repository-db validate`. |
 | `generated_side_effect` | A materializer or validator changed tracked files; fix it to write only declared paths. |
 | `credentials` | Sign in (`gh auth login`), or configure the Environment's credential helper / deploy key (a key in `~/.ssh/config` is accepted when `git ls-remote` reaches the remote non-interactively). |
-| `boundary_violation` | Run the command against the data checkout itself, on its branch, with the right `origin`. |
+| `boundary_violation` | Run the command against the data checkout itself, on its branch, with the right `origin`. In an app, the checkout may also be a different data repository than the one the app serves (`expect`), or a link resolving outside the module (`expect.within`): replace the mount with a real checkout of the app's data repository inside the module. |
 | `revert_not_supported` | Discard the whole draft instead (`repository-db discard --draft`), or change the record by an ordinary edit. |
 | `unpushed_commit` | Finish the waiting send before discarding. |
 | `mount_unavailable` | The checkout is not there yet; the sync host opens it when it appears. |

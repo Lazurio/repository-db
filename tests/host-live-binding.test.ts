@@ -334,3 +334,9 @@ describe("expect.within keeps a host inside the app's module", () => {
 		expect(await host.read((db) => db.config.app)).toBe("fixture");
 	});
 });
+
+test("expect.within set to the filesystem root serves any real checkout", async () => {
+	const { fixture, b } = setup();
+	const { host } = track({ mountRoot: b, expect: { remote: fixture.originPath, branch: fixture.branch, within: path.parse(b).root } });
+	expect((await host.refresh()).available).toBe(true);
+});

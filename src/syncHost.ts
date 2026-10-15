@@ -311,7 +311,8 @@ export function createSyncHost(options: SyncHostOptions): SyncHost {
 				`The data checkout ${mountRoot} is not available.`,
 			);
 		}
-		if (real === root || real.startsWith(`${root}${path.sep}`)) return;
+		const relative = path.relative(root, real);
+		if (relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative))) return;
 		throw new BoundaryViolationError(
 			`The data checkout ${mountRoot} resolves to ${real}, outside ${within}. Nothing was read, fetched or pulled.`,
 		);

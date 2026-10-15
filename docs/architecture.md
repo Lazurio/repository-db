@@ -146,8 +146,10 @@ host side of synchronisation. It is framework-agnostic, one per checkout.
   `config_changed`. It stays cheap: the configuration is re-read only when its
   file changed. With `expect: { remote, branch }`, a checkout of any other data
   repository is refused with `boundary_violation`, and nothing is fetched or
-  pulled. Each refusal drops the facade, so the next call opens the checkout
-  anew.
+  pulled. With `expect.within`, the checkout's real path (symbolic links
+  resolved, checked on every call) must also lie inside that directory, so a
+  mount that links to a checkout elsewhere is refused the same way. Each
+  refusal drops the facade, so the next call opens the checkout anew.
 
 - **`run(kind, fn)`** — the serialized mutation queue, shared by every host of
   the same checkout in the process. Every write, publish, finish-send, pull and
