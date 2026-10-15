@@ -80,7 +80,7 @@ signal where a host can accept them.
 
 ## Host sync service
 
-`createSyncHost({ mountRoot, intervalMs?, autoPull?, recordOf? })` is the host side of
+`createSyncHost({ mountRoot, intervalMs?, autoPull?, expect?, recordOf? })` is the host side of
 synchronisation, so no app rebuilds it. It is framework-agnostic; the app keeps
 only its HTTP/SSE wiring.
 
@@ -102,6 +102,10 @@ only its HTTP/SSE wiring.
   other records.
 - A checkout that does not exist yet, or vanished, is opened again on every
   check; a failed open is never cached.
+- Before every read and mutation the host checks that the checkout is still the
+  one it opened: `mount_unavailable` when it or its configuration is gone,
+  `config_changed` on a boundary change. With `expect: { remote, branch }` it
+  serves only that data repository (`boundary_violation` otherwise).
 
 ## Draft & Publish standard
 

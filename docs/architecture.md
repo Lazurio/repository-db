@@ -137,8 +137,17 @@ back by the gate.
 
 ## The sync host
 
-`createSyncHost({ mountRoot, intervalMs, autoPull, recordOf })` is the host side
-of synchronisation. It is framework-agnostic, one per checkout.
+`createSyncHost({ mountRoot, intervalMs, autoPull, expect, recordOf })` is the
+host side of synchronisation. It is framework-agnostic, one per checkout.
+
+- **Live check.** Before every read and mutation and in the background check,
+  the host checks that the checkout is still the one it opened. A missing mount
+  or configuration is `mount_unavailable`; a boundary change is
+  `config_changed`. It stays cheap: the configuration is re-read only when its
+  file changed. With `expect: { remote, branch }`, a checkout of any other data
+  repository is refused with `boundary_violation`, and nothing is fetched or
+  pulled. Each refusal drops the facade, so the next call opens the checkout
+  anew.
 
 - **`run(kind, fn)`** — the serialized mutation queue, shared by every host of
   the same checkout in the process. Every write, publish, finish-send, pull and
@@ -152,7 +161,10 @@ of synchronisation. It is framework-agnostic, one per checkout.
 - **`subscribe(listener)`** — events:
   - `status`;
   - `remote-pulled` — paths, plus the records they are; the engine knows the
-    Collection layout, and `recordOf` maps others;
+    Collection layout, and `recordOf` maps others. It is emitted whenever a
+    pull, publish or finish-send brought colleagues' work in, whatever the
+    callback returned. A mutation made through another facade is detected from
+    the moved HEAD;
   - `conflict`;
   - `error`.
 - **Background check** every `intervalMs` (default 30 s), in the queue: fetch,

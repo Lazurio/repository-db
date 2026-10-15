@@ -1,9 +1,21 @@
+import { statSync } from "node:fs";
 import path from "node:path";
-import { gitFetchAsync } from "./git.ts";
+import { assertDataRepoBoundary, normalizeRemoteUrl } from "./boundary.ts";
+import { CONFIG_FILE_NAME } from "./config.ts";
+import {
+	gitAheadBehind,
+	gitChangedPaths,
+	gitDirtyPaths,
+	gitFetchAsync,
+	gitHeadCommit,
+	runGit,
+} from "./git.ts";
+import { ENGINE_DIR } from "./lock.ts";
 import type { DraftOwner } from "./origin.ts";
 import type { PullResult } from "./publish.ts";
-import { RepositoryDb } from "./repositoryDb.ts";
+import { RepositoryDb, takeIncomingChanges } from "./repositoryDb.ts";
 import {
+	BoundaryViolationError,
 	type ConflictState,
 	PullBlockedError,
 	PublishLockedError,
@@ -30,7 +42,11 @@ import {
  *     fast-forward to colleagues' work whenever the engine allows it — also
  *     under a draft of other records;
  *   - recovery: a checkout that does not exist yet (or vanished) is opened
- *     again on every check; a failed open is never cached.
+ *     again on every check; a failed open is never cached;
+ *   - a live check before every read and mutation: the checkout must still be
+ *     there, with a configuration of the same boundary (and, with `expect`,
+ *     the data repository the app serves). Cheap: the configuration is re-read
+ *     only when its file changed.
  *
  * Framework-agnostic on purpose: the app keeps only its HTTP or SSE wiring.
  */
@@ -48,6 +64,13 @@ export interface SyncHostOptions {
 	 * `collectionRecord`; an app with nested record files maps them here and
 	 * returns `collectionRecord` for the rest. `null` means "not a record".
 	 */
+	/**
+	 * The data repository this app serves. When set, a checkout whose
+	 * configuration names another remote or branch is refused with
+	 * `boundary_violation` — on open, before every read and mutation, and in the
+	 * background check — so nothing is fetched or pulled into the wrong data.
+	 */
+	expect?: { remote: string; branch: string } | undefined;
 	recordOf?: (
 		path: string,
 		collectionRecord: { collection: string; id: string } | null,
@@ -249,24 +272,152 @@ export function createSyncHost(options: SyncHostOptions): SyncHost {
 		}
 	}
 
-	function open(): RepositoryDb {
-		if (facade) return facade;
+	const configPath = path.join(mountRoot, CONFIG_FILE_NAME);
+	/**
+	 * Files whose change can change what the checkout is: its configuration,
+	 * Git's config (remotes; in the common dir for a worktree) and HEAD (the
+	 * branch; per worktree). Resolved when the facade is opened.
+	 */
+	let identityFiles: string[] = [configPath];
+	/** Their stats when the facade was last validated. */
+	let configStat = "";
+
+	function resolveIdentityFiles(): string[] {
+		const gitDir = runGit(mountRoot, ["rev-parse", "--absolute-git-dir"]).stdout.trim();
+		const commonDir = runGit(mountRoot, ["rev-parse", "--git-common-dir"]).stdout.trim();
+		if (!gitDir || !commonDir) return [configPath];
+		return [
+			configPath,
+			path.join(path.resolve(mountRoot, commonDir), "config"),
+			path.join(gitDir, "HEAD"),
+		];
+	}
+
+	function assertExpected(config: RepositoryDb["config"]): void {
+		const expected = options.expect;
+		if (!expected) return;
+		const sameRemote = normalizeRemoteUrl(config.dataRepo.remote) === normalizeRemoteUrl(expected.remote);
+		if (sameRemote && config.dataRepo.branch === expected.branch) return;
+		throw new BoundaryViolationError(
+			`This app serves ${expected.remote}#${expected.branch}, but the data checkout ${mountRoot} is ${config.dataRepo.remote}#${config.dataRepo.branch}. Nothing was read, fetched or pulled.`,
+		);
+	}
+
+	function statKey(): string {
+		// The configuration must exist (statSync throws otherwise); a missing Git
+		// file is part of the key, so its disappearance triggers the full check.
+		return identityFiles
+			.map((file, index) => {
+				try {
+					const stats = statSync(file);
+					return `${stats.ino}:${stats.size}:${stats.mtimeMs}`;
+				} catch (error) {
+					if (index === 0) throw error;
+					return "missing";
+				}
+			})
+			.join("|");
+	}
+
+	/**
+	 * Is the open facade still the checkout it was opened as? The mount and its
+	 * configuration must exist. When the configuration, Git's config or HEAD
+	 * changed, the configuration is re-read through the facade (a boundary
+	 * change is `config_changed`) and the full boundary guard runs again: the
+	 * mount is the repo root, `origin` and the branch match (`boundary_violation`).
+	 */
+	function verifyLive(db: RepositoryDb): void {
+		let key: string;
 		try {
-			facade = RepositoryDb.open(mountRoot);
-			lastOpenError = "";
-			return facade;
+			key = statKey();
+		} catch {
+			throw new RepositoryDbError(
+				"mount_unavailable",
+				`The data checkout ${mountRoot} is not available: ${CONFIG_FILE_NAME} is gone.`,
+			);
+		}
+		if (key === configStat) return;
+		const config = db.config;
+		assertDataRepoBoundary(mountRoot, config);
+		assertExpected(config);
+		configStat = key;
+	}
+
+	function reportOpenError(problem: SyncHostProblem): void {
+		const key = `${problem.code}\0${problem.message}`;
+		if (key !== lastOpenError) {
+			lastOpenError = key;
+			emit({ type: "error", operation: "open", error: problem });
+		}
+	}
+
+	function open(): RepositoryDb {
+		if (facade) {
+			try {
+				verifyLive(facade);
+				return facade;
+			} catch (error) {
+				facade = undefined;
+				configStat = "";
+				identityFiles = [configPath];
+				reportOpenError(problemOf(error));
+				throw error;
+			}
+		}
+		let opened: RepositoryDb;
+		try {
+			opened = RepositoryDb.open(mountRoot);
+			assertExpected(opened.config);
+			identityFiles = resolveIdentityFiles();
+			configStat = statKey();
 		} catch (error) {
 			const problem = problemOf(error);
-			const key = `${problem.code}\0${problem.message}`;
-			if (key !== lastOpenError) {
-				lastOpenError = key;
-				emit({ type: "error", operation: "open", error: problem });
-			}
+			reportOpenError(problem);
+			// A checkout that is there but is not this app's data is a typed
+			// refusal; anything else means the data is not available yet.
+			if (error instanceof BoundaryViolationError) throw error;
 			throw new RepositoryDbError(
 				"mount_unavailable",
 				`The data checkout ${mountRoot} is not available yet: ${problem.message}`,
 			);
 		}
+		facade = opened;
+		lastOpenError = "";
+		return opened;
+	}
+
+	/** Where the checkout stood before a mutation, to tell afterwards what came in. */
+	function positionOf(db: RepositoryDb): { head: string | undefined; clean: boolean } {
+		const head = gitHeadCommit(db.mountRoot);
+		const dirty = gitDirtyPaths(db.mountRoot).filter((entry) => !entry.startsWith(`${ENGINE_DIR}/`));
+		const { ahead } = gitAheadBehind(db.mountRoot, db.config.dataRepo.branch);
+		return { head, clean: dirty.length === 0 && ahead === 0 };
+	}
+
+	/**
+	 * Colleagues' paths a mutation brought in: what the facade's own publish,
+	 * finish-send or pull recorded (whatever the callback returned), together
+	 * with the `remoteChanges` of a result the callback did return (a mutation
+	 * through another facade); failing both, when the checkout held no local
+	 * work and moved forward, everything between the two heads.
+	 */
+	function incomingSince(
+		db: RepositoryDb,
+		before: { head: string | undefined; clean: boolean },
+		result: unknown,
+	): string[] {
+		const returned = (result as { remoteChanges?: unknown } | undefined)?.remoteChanges;
+		const recorded = [
+			...new Set([
+				...takeIncomingChanges(db),
+				...(Array.isArray(returned) ? returned.filter((entry): entry is string => typeof entry === "string") : []),
+			]),
+		];
+		if (recorded.length > 0) return recorded;
+		const after = gitHeadCommit(db.mountRoot);
+		if (!before.clean || !before.head || !after || after === before.head) return [];
+		if (runGit(db.mountRoot, ["merge-base", "--is-ancestor", before.head, after]).status !== 0) return [];
+		return gitChangedPaths(db.mountRoot, [before.head, after]);
 	}
 
 	function forgetIfGone(error: unknown): void {
@@ -345,6 +496,8 @@ export function createSyncHost(options: SyncHostOptions): SyncHost {
 	function run<T>(kind: string, operation: (db: RepositoryDb) => T | Promise<T>): Promise<T> {
 		return enqueue(mountRoot, async () => {
 			const db = open();
+			takeIncomingChanges(db);
+			const before = positionOf(db);
 			let result: T;
 			try {
 				result = await operation(db);
@@ -353,23 +506,29 @@ export function createSyncHost(options: SyncHostOptions): SyncHost {
 				if (error instanceof PullBlockedError) {
 					pullBlocked = { paths: error.paths, message: error.message };
 				}
-				publishStatus();
+				const status = publishStatus();
+				// A callback can fail after its pull or send already moved the
+				// checkout; the records that came in are still announced.
+				announceIncoming(db, safeIncoming(db, before, undefined), status);
 				throw error;
 			}
 			if (kind === "pull" && (result as PullResult | undefined)?.state === "pulled") pullBlocked = null;
 			const status = publishStatus();
-			// A pull, and a send that integrated colleagues' work, both bring
-			// their records into this checkout.
-			const incoming = (result as { remoteChanges?: unknown } | undefined)?.remoteChanges;
-			if (Array.isArray(incoming)) {
-				announceIncoming(
-					db,
-					incoming.filter((entry): entry is string => typeof entry === "string"),
-					status,
-				);
-			}
+			announceIncoming(db, safeIncoming(db, before, result), status);
 			return result;
 		});
+	}
+
+	function safeIncoming(
+		db: RepositoryDb,
+		before: { head: string | undefined; clean: boolean },
+		result: unknown,
+	): string[] {
+		try {
+			return incomingSince(db, before, result);
+		} catch {
+			return [];
+		}
 	}
 
 	async function check(): Promise<SyncHostStatus> {
@@ -383,6 +542,13 @@ export function createSyncHost(options: SyncHostOptions): SyncHost {
 		// collide on Git's ref locks. A short deadline keeps a hung network from
 		// holding writes back for long.
 		return enqueue(mountRoot, async () => {
+			// Again inside the queue, right before the network: the checkout may
+			// have been pointed elsewhere while this check waited for its turn.
+			try {
+				db = open();
+			} catch {
+				return publishStatus();
+			}
 			try {
 				await gitFetchAsync(db.mountRoot, FETCH_TIMEOUT_MS);
 				fetchError = null;
@@ -408,7 +574,7 @@ export function createSyncHost(options: SyncHostOptions): SyncHost {
 				}
 			}
 			const status = publishStatus();
-			if (pulled?.state === "pulled") announceIncoming(db, pulled.remoteChanges, status);
+			if (pulled?.state === "pulled") announceIncoming(db, takeIncomingChanges(db), status);
 			return status;
 		});
 	}
