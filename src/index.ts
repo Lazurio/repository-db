@@ -30,6 +30,7 @@ export {
 	type RecordWriteOptions,
 } from "./collections.ts";
 export { CONFIG_FILE_NAME } from "./config.ts";
+export { assertDataPath, readDataFile } from "./dataPath.ts";
 export { normalizeRemoteUrl } from "./boundary.ts";
 export { ensureGenerated, type EnsureGeneratedResult } from "./generated.ts";
 export type { PullOptions, PullResult } from "./publish.ts";
