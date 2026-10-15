@@ -178,8 +178,11 @@ mapping (`recordOf`), and its derived readers.
 4. Release the app PR (step 3) and roll it out to every Environment in the same
    window. A pull on an older app version would otherwise meet the migrated repo
    and keep committing derived output.
-5. On each Environment: let the host pull, then confirm `git status` is clean
-   and the derived output exists (`repository-db generate` reports up to date).
+5. On each Environment: let the host pull (a checkout cloned before the
+   migration catches up to it the same way, see `derived_output_tracked` in
+   [`operations.md`](operations.md)), then confirm `git status` is clean, that
+   `git ls-files <derived path>` is empty, and that the derived output exists
+   (`repository-db generate` reports up to date).
 
 **If something fails mid-window:** do not revert the data-repo PR. Go forward:
 fix the app or the data-repo command, and leave the unconverted Environments

@@ -26,7 +26,7 @@ import {
 	runGitAsync,
 	runGitOrThrow,
 } from "./git.ts";
-import { assertDerivedOutputIgnored, ensureGenerated, runValidateCommands } from "./generated.ts";
+import { assertDerivedOutputIgnored, derivedOutputProblem, ensureGenerated, runValidateCommands } from "./generated.ts";
 import { ENGINE_DIR, acquirePublishLock } from "./lock.ts";
 import { clearDraftProvenance } from "./origin.ts";
 import { mergeCanonicalYamlThreeWay } from "./semanticYamlMerge.ts";
@@ -779,10 +779,16 @@ export async function pullRemote(
 	options: PullOptions = {},
 ): Promise<PullResult> {
 	assertDataRepoBoundary(mountRoot, config);
-	assertDerivedOutputIgnored(mountRoot, config);
+	// A checkout that still tracks derived output may only catch up to the
+	// published commit that stops tracking it (a migrated data repository);
+	// anything else is refused with the exact migration.
+	const legacy = derivedOutputProblem(mountRoot, config);
 	assertNoActiveConflict(mountRoot);
 
 	if (options.fetch !== false) await gitFetchAsync(mountRoot);
+	const remoteRef = `refs/remotes/origin/${config.dataRepo.branch}`;
+	const forbidden = [ENGINE_DIR, ...config.generatedManifest.map((entry) => entry.path)];
+	if (legacy && !removedAt(mountRoot, remoteRef, forbidden)) throw legacy;
 	const { behind } = gitAheadBehind(mountRoot, config.dataRepo.branch);
 	if (behind === 0) return { state: "up_to_date", behind: 0, remoteChanges: [] };
 
@@ -797,8 +803,10 @@ export async function pullRemote(
 				"A publish is waiting to be sent; finishing the send integrates the remote changes too.",
 			);
 		}
-		const remoteRef = `refs/remotes/origin/${branch}`;
 		const remoteChanges = gitChangedPaths(mountRoot, [`HEAD...${remoteRef}`]);
+		// A stale copy of the cache the migration stops tracking is no draft:
+		// it is set back so the fast-forward can remove it, then rebuilt.
+		if (legacy) restoreTracked(mountRoot, forbidden);
 		// Checked here, not left to Git: a fast-forward overwrites a tracked
 		// file missing from the working tree, so a drafted (unstaged) deletion
 		// would silently come back with the colleague's content.
@@ -823,4 +831,23 @@ export async function pullRemote(
 		}
 		return { state: "pulled", behind: behindNow, remoteChanges };
 	});
+}
+
+/**
+ * Whether `ref` tracks none of `paths`. Every path the engine forbids is
+ * checked, not only the first refusal, so a partially migrated tip is refused.
+ */
+function removedAt(mountRoot: string, ref: string, paths: readonly string[]): boolean {
+	const listed = runGit(mountRoot, ["ls-tree", "-r", "-z", "--name-only", ref, "--", ...paths]);
+	return listed.status === 0 && listed.stdout.split("\0").filter(Boolean).length === 0;
+}
+
+/** Set tracked files under `paths` back to HEAD (index and working tree). */
+function restoreTracked(mountRoot: string, paths: readonly string[]): void {
+	const tracked = runGit(mountRoot, ["ls-files", "-z", "--", ...paths]).stdout.split("\0").filter(Boolean);
+	if (tracked.length === 0) return;
+	const restored = runGit(mountRoot, ["checkout", "HEAD", "--", ...tracked]);
+	if (restored.status !== 0) {
+		throw new PullBlockedError([], restored.stderr.trim() || restored.stdout.trim());
+	}
 }

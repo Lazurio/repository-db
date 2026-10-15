@@ -1,7 +1,7 @@
 import { realpathSync, statSync } from "node:fs";
 import path from "node:path";
 import { assertDataRepoBoundary, normalizeRemoteUrl } from "./boundary.ts";
-import { CONFIG_FILE_NAME } from "./config.ts";
+import { CONFIG_FILE_NAME, loadRepositoryDbConfig } from "./config.ts";
 import {
 	gitAheadBehind,
 	gitChangedPaths,
@@ -12,7 +12,8 @@ import {
 } from "./git.ts";
 import { ENGINE_DIR } from "./lock.ts";
 import type { DraftOwner } from "./origin.ts";
-import type { PullResult } from "./publish.ts";
+import { derivedOutputProblem } from "./generated.ts";
+import { type PullResult, pullRemote } from "./publish.ts";
 import { RepositoryDb, takeIncomingChanges } from "./repositoryDb.ts";
 import {
 	BoundaryViolationError,
@@ -560,12 +561,45 @@ export function createSyncHost(options: SyncHostOptions): SyncHost {
 		}
 	}
 
+	/**
+	 * A checkout cloned before its data repository stopped tracking derived
+	 * output cannot be opened, so the ordinary check below never pulls the
+	 * commit that migrates it. This pull brings exactly that commit in (it
+	 * refuses unless the published tip no longer tracks the refused paths).
+	 */
+	function catchUp(): Promise<SyncHostStatus> {
+		return enqueue(mountRoot, async () => {
+			let pulled: PullResult | undefined;
+			try {
+				assertWithin();
+				const config = loadRepositoryDbConfig(mountRoot);
+				assertDataRepoBoundary(mountRoot, config);
+				assertExpected(config);
+				if (derivedOutputProblem(mountRoot, config)) {
+					await gitFetchAsync(mountRoot, FETCH_TIMEOUT_MS);
+					fetchError = null;
+					pulled = await pullRemote(mountRoot, config, { fetch: false });
+				}
+			} catch (error) {
+				if (error instanceof PullBlockedError) {
+					pullBlocked = { paths: error.paths, message: error.message };
+				}
+				// Anything else stays what open() reports in the status.
+			}
+			const status = publishStatus();
+			if (pulled?.state === "pulled" && status.available) {
+				announceIncoming(open(), pulled.remoteChanges, status);
+			}
+			return status;
+		});
+	}
+
 	async function check(): Promise<SyncHostStatus> {
 		let db: RepositoryDb;
 		try {
 			db = open();
 		} catch {
-			return publishStatus();
+			return autoPull ? catchUp() : publishStatus();
 		}
 		// In the queue: a fetch running beside a publish's own fetch or push can
 		// collide on Git's ref locks. A short deadline keeps a hung network from
