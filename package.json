@@ -1,6 +1,6 @@
 {
   "name": "@lazurio/repository-db",
-  "version": "3.2.4",
+  "version": "3.2.5",
   "description": "Git-backed YAML repository database engine: local serverless data layer with typed collections, draft/publish flow and deterministic generated read models.",
   "license": "MIT",
   "type": "module",

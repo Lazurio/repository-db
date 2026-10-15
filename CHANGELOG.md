@@ -1,5 +1,24 @@
 # Changelog
 
+## 3.2.5 — 2026-10-15
+
+- **A publish goes only to `data_repo.remote`** (#32). The boundary guard also
+  compares every effective push URL of `origin` (`git remote get-url --push
+  --all origin`, which applies `remote.origin.pushurl` and `url.*.pushInsteadOf`
+  / `insteadOf` from any config level) with `data_repo.remote`; a mismatch is
+  `boundary_violation` before anything is committed or pushed. A send checks
+  the push target again right before every push, so a rewrite added meanwhile
+  in the global or system config is caught too.
+- **A validation conflict keeps the validator's explanation** (#33). The
+  integrated result's failure keeps the command and its own output, bounded to
+  the first 20 lines / 4 KB, in the conflict message and the `publish_conflict`
+  error. The same bound now applies to a live `validation_failed` and
+  `materialize_failed`, which report the command's own output instead of
+  repeating it after Node's "Command failed" line.
+- Conflict handoffs name no host paths: the conflict record is
+  `.repository-db/conflict.json` in the data checkout, and Git's messages about
+  the throwaway integration lane say `<integration lane>`.
+
 ## 3.2.4 — 2026-10-15
 
 - **`expect.within`.** `createSyncHost({ expect: { remote, branch, within } })`
