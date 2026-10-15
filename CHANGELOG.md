@@ -8,8 +8,12 @@ Gaps found in reviews of consumer apps, fixed in the sync host:
   `read()`, `run()`, `db()` and background check, the host checks the live
   mount. A missing mount or `repository-db.yaml` is `mount_unavailable`. A
   changed configuration is re-read through the facade, and a boundary change is
-  `config_changed`. Both drop the facade, and the callback does not run. It stays
-  cheap: the configuration is re-read only when its file's stat changed.
+  `config_changed`, and a changed `origin`, branch or repository root is
+  `boundary_violation`. Each drops the facade, and the callback does not run.
+  It stays cheap: the configuration and the full boundary guard run again only
+  when `repository-db.yaml`, Git's `config` or `HEAD` (in the real git dirs,
+  also for worktrees) changed. The background check repeats the live check
+  inside the mutation queue, right before it fetches.
   Opening a checkout that is there but fails the boundary guard is now
   `boundary_violation` instead of `mount_unavailable`.
 - **`remote-pulled` no longer depends on the callback's return value.** The

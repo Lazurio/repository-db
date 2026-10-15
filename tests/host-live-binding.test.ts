@@ -90,6 +90,70 @@ describe("reads and mutations re-validate the live checkout before they run", ()
 	});
 });
 
+describe("the live check covers the checkout's Git identity, not only its configuration", () => {
+	test("a changed origin with an unchanged configuration is boundary_violation before the callback", async () => {
+		const { fixture, b } = setup();
+		const { host } = track({ mountRoot: b });
+		await host.read((db) => db.status());
+		const foreign = path.join(fixture.root, "foreign.git");
+		git(fixture.root, ["init", "--quiet", "--bare", foreign]);
+		git(b, ["remote", "set-url", "origin", foreign]);
+
+		let ran = false;
+		await expect(host.read(() => (ran = true))).rejects.toMatchObject({ code: "boundary_violation" });
+		await expect(host.run("write", () => (ran = true))).rejects.toMatchObject({ code: "boundary_violation" });
+		expect(ran).toBe(false);
+	});
+
+	test("a changed branch with an unchanged configuration is boundary_violation before the callback", async () => {
+		const { b } = setup();
+		const { host } = track({ mountRoot: b });
+		await host.read((db) => db.status());
+		git(b, ["checkout", "--quiet", "-b", "elsewhere"]);
+
+		let ran = false;
+		await expect(host.read(() => (ran = true))).rejects.toMatchObject({ code: "boundary_violation" });
+		expect(ran).toBe(false);
+	});
+
+	test("a configuration and origin swapped while the background check waits for the queue fetch nothing", async () => {
+		const { fixture, a, b } = setup();
+		const { host } = track({ mountRoot: b, expect: { remote: fixture.originPath, branch: fixture.branch } });
+		await host.refresh();
+		// A foreign data repository with a commit on the same branch name.
+		const foreign = path.join(fixture.root, "foreign.git");
+		git(fixture.root, ["init", "--quiet", "--bare", "--initial-branch", fixture.branch, foreign]);
+		git(a, ["push", "--quiet", foreign, `HEAD:${fixture.branch}`]);
+		const foreignClone = cloneFixture({ ...fixture, originPath: foreign }, "foreign-clone");
+		writeFixtureDocument(foreignClone, "foreign", { code: "F" });
+		git(foreignClone, ["add", "--all"]);
+		git(foreignClone, ["commit", "--quiet", "--message", "foreign"]);
+		git(foreignClone, ["push", "--quiet", "origin", fixture.branch]);
+
+		const head = git(b, ["rev-parse", "HEAD"]).trim();
+		const tracking = git(b, ["rev-parse", `origin/${fixture.branch}`]).trim();
+		let release: () => void = () => undefined;
+		const busy = host.run("write", () => new Promise<void>((resolve) => (release = resolve)));
+		const checking = host.refresh(); // waits behind the busy mutation
+		await new Promise((resolve) => setTimeout(resolve, 50)); // the busy mutation has started
+		// While it waits, the checkout is pointed at the foreign repository.
+		const configPath = path.join(b, "repository-db.yaml");
+		writeFileSync(configPath, readFileSync(configPath, "utf8").replace(`remote: ${fixture.originPath}`, `remote: ${foreign}`), "utf8");
+		git(b, ["remote", "set-url", "origin", foreign]);
+		release();
+		await busy;
+		const status = await checking;
+
+		expect(status.available).toBe(false);
+		expect(status.error?.code).toBe("boundary_violation");
+		expect(git(b, ["rev-parse", "HEAD"]).trim()).toBe(head);
+		expect(git(b, ["rev-parse", `origin/${fixture.branch}`]).trim()).toBe(tracking);
+		// And on every later check.
+		expect((await host.refresh()).available).toBe(false);
+		expect(git(b, ["rev-parse", `origin/${fixture.branch}`]).trim()).toBe(tracking);
+	});
+});
+
 describe("remote-pulled does not depend on what the app's callback returns", () => {
 	test("a publish that integrated colleagues' work announces it, even when the callback returns something else", async () => {
 		const { a, b } = setup();

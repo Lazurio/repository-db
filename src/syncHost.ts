@@ -1,6 +1,6 @@
 import { statSync } from "node:fs";
 import path from "node:path";
-import { normalizeRemoteUrl } from "./boundary.ts";
+import { assertDataRepoBoundary, normalizeRemoteUrl } from "./boundary.ts";
 import { CONFIG_FILE_NAME } from "./config.ts";
 import {
 	gitAheadBehind,
@@ -273,8 +273,25 @@ export function createSyncHost(options: SyncHostOptions): SyncHost {
 	}
 
 	const configPath = path.join(mountRoot, CONFIG_FILE_NAME);
-	/** Stat of the configuration the facade was last validated against. */
+	/**
+	 * Files whose change can change what the checkout is: its configuration,
+	 * Git's config (remotes; in the common dir for a worktree) and HEAD (the
+	 * branch; per worktree). Resolved when the facade is opened.
+	 */
+	let identityFiles: string[] = [configPath];
+	/** Their stats when the facade was last validated. */
 	let configStat = "";
+
+	function resolveIdentityFiles(): string[] {
+		const gitDir = runGit(mountRoot, ["rev-parse", "--absolute-git-dir"]).stdout.trim();
+		const commonDir = runGit(mountRoot, ["rev-parse", "--git-common-dir"]).stdout.trim();
+		if (!gitDir || !commonDir) return [configPath];
+		return [
+			configPath,
+			path.join(path.resolve(mountRoot, commonDir), "config"),
+			path.join(gitDir, "HEAD"),
+		];
+	}
 
 	function assertExpected(config: RepositoryDb["config"]): void {
 		const expected = options.expect;
@@ -287,14 +304,27 @@ export function createSyncHost(options: SyncHostOptions): SyncHost {
 	}
 
 	function statKey(): string {
-		const stats = statSync(configPath);
-		return `${stats.ino}:${stats.size}:${stats.mtimeMs}`;
+		// The configuration must exist (statSync throws otherwise); a missing Git
+		// file is part of the key, so its disappearance triggers the full check.
+		return identityFiles
+			.map((file, index) => {
+				try {
+					const stats = statSync(file);
+					return `${stats.ino}:${stats.size}:${stats.mtimeMs}`;
+				} catch (error) {
+					if (index === 0) throw error;
+					return "missing";
+				}
+			})
+			.join("|");
 	}
 
 	/**
 	 * Is the open facade still the checkout it was opened as? The mount and its
-	 * configuration must exist; a changed configuration is re-read through the
-	 * facade, which refuses a boundary change (`config_changed`).
+	 * configuration must exist. When the configuration, Git's config or HEAD
+	 * changed, the configuration is re-read through the facade (a boundary
+	 * change is `config_changed`) and the full boundary guard runs again: the
+	 * mount is the repo root, `origin` and the branch match (`boundary_violation`).
 	 */
 	function verifyLive(db: RepositoryDb): void {
 		let key: string;
@@ -307,7 +337,9 @@ export function createSyncHost(options: SyncHostOptions): SyncHost {
 			);
 		}
 		if (key === configStat) return;
-		assertExpected(db.config);
+		const config = db.config;
+		assertDataRepoBoundary(mountRoot, config);
+		assertExpected(config);
 		configStat = key;
 	}
 
@@ -327,6 +359,7 @@ export function createSyncHost(options: SyncHostOptions): SyncHost {
 			} catch (error) {
 				facade = undefined;
 				configStat = "";
+				identityFiles = [configPath];
 				reportOpenError(problemOf(error));
 				throw error;
 			}
@@ -335,6 +368,7 @@ export function createSyncHost(options: SyncHostOptions): SyncHost {
 		try {
 			opened = RepositoryDb.open(mountRoot);
 			assertExpected(opened.config);
+			identityFiles = resolveIdentityFiles();
 			configStat = statKey();
 		} catch (error) {
 			const problem = problemOf(error);
@@ -508,6 +542,13 @@ export function createSyncHost(options: SyncHostOptions): SyncHost {
 		// collide on Git's ref locks. A short deadline keeps a hung network from
 		// holding writes back for long.
 		return enqueue(mountRoot, async () => {
+			// Again inside the queue, right before the network: the checkout may
+			// have been pointed elsewhere while this check waited for its turn.
+			try {
+				db = open();
+			} catch {
+				return publishStatus();
+			}
 			try {
 				await gitFetchAsync(db.mountRoot, FETCH_TIMEOUT_MS);
 				fetchError = null;
