@@ -8,21 +8,31 @@ standard for the card is [`draft-publish-standard.md`](draft-publish-standard.md
 ## Must
 
 1. **One sync host per data checkout**, created at server start:
-   `createSyncHost({ mountRoot })`, then `start()`. Do not wait for the
-   checkout to exist: the host opens it when it appears.
+   `createSyncHost({ mountRoot, expect: { remote, branch } })`, then `start()`.
+   `expect` names the data repository the app serves. A checkout whose
+   configuration names another remote or branch is then refused with
+   `boundary_violation`, and nothing is fetched or pulled into it. Do not wait
+   for the checkout to exist: the host opens it when it appears.
 2. **Every mutation through `host.run(kind, db => …)`.** That covers record
    writes, publish, finish-send, pull, discard, conflict abort/resolve and
    `recordOrigin`. The queue serializes them per checkout. `kind` is a free
    label for diagnostics (`"write"`, `"publish"`, `"pull"`, …).
-3. **Every read through `host.read(db => …)`.** `host.db()` exists for
-   synchronous code, but errors that facade meets later are not seen by the host.
+3. **Every read through `host.read(db => …)`.** Before every read and mutation
+   the host checks that the checkout is still the one it opened. A missing
+   mount or configuration is `mount_unavailable`; a boundary change is
+   `config_changed`. Either way your callback does not run on stale state.
+   `host.db()` exists for synchronous code, but errors that facade meets later
+   are not seen by the host.
 4. **Call `db.ensureGenerated()` before reading a derived path** (anything
    declared in `generated_manifest`). It returns at once when the output is
    current.
 5. **Write records with their base revision.** Use `Collection.put/remove`, or
    `writeRecordDraft` for layouts a Collection does not describe. A save carries
    the `baseRevision` of the version that was edited (`null` for a new record),
-   and a stale save is refused with `record_changed`.
+   and a stale save is refused with `record_changed`. Capture the revision
+   **when the editor opens** the record (it comes with the read), never at save
+   time. A revision read at save time always matches, so it would overwrite a
+   colleague's change unseen.
 6. **Confirm what was shown.** Publish passes the `revision` the review returned.
    Finish-send passes the `pendingHead` the card shows. Discard passes the
    revision too.
@@ -39,9 +49,13 @@ standard for the card is [`draft-publish-standard.md`](draft-publish-standard.md
    `host.status()` plus the review, or use `DraftPublishPanel` from
    `@lazurio/repository-db/ui`. Wire only the actions you implement; the rest
    show as unavailable with a reason.
-10. **Forward host events to the browser** (SSE or similar). On `remote-pulled`,
-   reload the records named in `records` (or `paths`). If your record files are
-   nested, pass `recordOf` to `createSyncHost`.
+10. **Forward host events to the browser** (SSE or similar). On `remote-pulled`
+   (colleagues' records came in), reload the records named in `records` (or
+   `paths`), and do the same after a discard. Every mounted view (lists, details,
+   derived summaries) reloads, not only the one that triggered it. The host
+   emits `remote-pulled` itself whenever a pull, a publish or a finish-send
+   brought colleagues' work in, whatever your `run()` callback returns. If your
+   record files are nested, pass `recordOf` to `createSyncHost`.
 11. **Surface the error codes below** in the user's language.
 
 ## Must not
@@ -80,6 +94,16 @@ are commands **of the data repo**:
 - They are deterministic: stable order, stable serialization, LF, no wall-clock
   timestamps, no host paths.
 - They get no input on stdin.
+- **Validators do not follow symbolic links.** `lstat` every directory component
+  and every file they read, and refuse a link (directory or file). Otherwise a
+  link could make them validate content from outside the data repo, or skip the
+  content that is really there.
+- **Validators select files exactly like the app's reader.** If the app reads
+  `.yaml` and `.yml` (or matches case-insensitively), the validator checks the
+  same set. A file the app reads but the validator skips is unvalidated data.
+- **Nested collections get the same checks as flat ones.** Records below their
+  collection directory (e.g. `data/<collection>/<group>/<id>.yaml`) are
+  validated against the same schema as `data/<collection>/<id>.yaml`.
 
 A command that changes a tracked file refuses the publish
 (`generated_side_effect`), and its changes are put back.

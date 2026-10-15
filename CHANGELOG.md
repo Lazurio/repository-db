@@ -1,5 +1,33 @@
 # Changelog
 
+## 3.2.3 — 2026-10-15
+
+Gaps found in reviews of consumer apps, fixed in the sync host:
+
+- **Reads and mutations run only on the checkout the host opened.** Before every
+  `read()`, `run()`, `db()` and background check, the host checks the live
+  mount. A missing mount or `repository-db.yaml` is `mount_unavailable`. A
+  changed configuration is re-read through the facade, and a boundary change is
+  `config_changed`. Both drop the facade, and the callback does not run. It stays
+  cheap: the configuration is re-read only when its file's stat changed.
+  Opening a checkout that is there but fails the boundary guard is now
+  `boundary_violation` instead of `mount_unavailable`.
+- **`remote-pulled` no longer depends on the callback's return value.** The
+  facade records the colleagues' paths its own publish, finish-send and pull
+  brought in, and the host announces them after the mutation — also when the
+  callback wraps the result or fails afterwards. A result the callback returns
+  still counts (a mutation through another facade), and a fast-forward of a
+  checkout without local work is detected from the moved HEAD.
+- **`createSyncHost({ expect: { remote, branch } })`** binds a host to the data
+  repository the app serves. A checkout whose configuration names another
+  remote or branch is refused with `boundary_violation`: on open (also when it
+  appears after start), before every read and mutation, and in the background
+  check, with nothing fetched or pulled.
+- Docs: data-repo validators do not follow symbolic links, select files exactly
+  like the app's reader, and check nested collections like flat ones; apps
+  capture a record's revision when an editor opens it, and every mounted view
+  reloads on `remote-pulled` and after a discard.
+
 ## 3.2.2 — 2026-10-14
 
 - **Consumers with strict compiler settings typecheck the engine** (#28). The

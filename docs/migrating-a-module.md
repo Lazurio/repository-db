@@ -87,6 +87,13 @@ printf '%s\n' '/.repository-db/' '/<each derived path>' >> .gitignore
 - **Commands.** Make every materializer and validator self-contained in the data
   repo (`scripts/`, the data repo's own `package.json` if it needs
   dependencies). Each one writes only to declared paths, and is deterministic.
+  Validators also follow the rules in
+  [`app-contract.md`](app-contract.md#data-repo-commands):
+  - they never follow symbolic links: `lstat` every directory component and
+    file, and refuse links;
+  - they select files exactly like the app's reader (the same extensions, and
+    the same case sensitivity);
+  - they give nested collections the same schema checks as flat ones.
 - **`repository-db.yaml`.** Keep `schema_version: repository-db.config.v1`. Keep
   `generated_manifest` entries only for real derived output, each with its
   `materializer`.
@@ -121,12 +128,14 @@ On a branch of the app (module) repo:
    its own conflict state, and its own card state machine. Delete `skipValidate`,
    `skipMaterialize` and `retryConflictSend` usages.
 3. **Wire the host** as in [`app-contract.md`](app-contract.md):
-   - one `createSyncHost({ mountRoot, recordOf? })` at server start, then
-     `start()`;
+   - one `createSyncHost({ mountRoot, expect: { remote, branch }, recordOf? })`
+     at server start, then `start()`;
    - every mutation through `host.run`;
    - every read through `host.read`, with `ensureGenerated()` before reading
      derived output;
-   - events forwarded to the browser;
+   - events forwarded to the browser, with every mounted view reloading on
+     `remote-pulled` and after a discard;
+   - record revisions captured when an editor opens a record, not at save time;
    - the card from `deriveDraftPanel` or `DraftPublishPanel`.
 4. **Adapt to the API changes** listed in `CHANGELOG.md` under 3.2.0:
    - `DraftPanelInput` takes `status`;
