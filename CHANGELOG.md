@@ -8,7 +8,8 @@
   migrates it: after the data-repo PR the app stayed unavailable on that
   Environment until someone fast-forwarded the checkout by hand. A pull now
   accepts this one case: the checkout tracks derived output (or
-  `.repository-db/`) and the published tip no longer tracks those paths. A
+  `.repository-db/`) and the published tip tracks none of the paths the engine
+  forbids, so a partially migrated tip is still refused. A
   stale copy of the cache is set back first and rebuilt afterwards; a data
   draft stays under the ordinary pull rule. The sync host runs this pull on its
   check when it cannot open the checkout (`autoPull`), and `repository-db sync

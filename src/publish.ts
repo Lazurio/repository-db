@@ -42,7 +42,6 @@ import {
 	type PublishResult,
 	type RepositoryDbConfig,
 	RepositoryDbError,
-	type TrackedDerivedOutputError,
 	ValidationFailedError,
 } from "./types.ts";
 
@@ -788,7 +787,8 @@ export async function pullRemote(
 
 	if (options.fetch !== false) await gitFetchAsync(mountRoot);
 	const remoteRef = `refs/remotes/origin/${config.dataRepo.branch}`;
-	if (legacy && !removedAt(mountRoot, remoteRef, legacy)) throw legacy;
+	const forbidden = [ENGINE_DIR, ...config.generatedManifest.map((entry) => entry.path)];
+	if (legacy && !removedAt(mountRoot, remoteRef, forbidden)) throw legacy;
 	const { behind } = gitAheadBehind(mountRoot, config.dataRepo.branch);
 	if (behind === 0) return { state: "up_to_date", behind: 0, remoteChanges: [] };
 
@@ -806,7 +806,7 @@ export async function pullRemote(
 		const remoteChanges = gitChangedPaths(mountRoot, [`HEAD...${remoteRef}`]);
 		// A stale copy of the cache the migration stops tracking is no draft:
 		// it is set back so the fast-forward can remove it, then rebuilt.
-		if (legacy) restoreTracked(mountRoot, legacy.paths);
+		if (legacy) restoreTracked(mountRoot, forbidden);
 		// Checked here, not left to Git: a fast-forward overwrites a tracked
 		// file missing from the working tree, so a drafted (unstaged) deletion
 		// would silently come back with the colleague's content.
@@ -833,9 +833,12 @@ export async function pullRemote(
 	});
 }
 
-/** Whether `ref` no longer tracks any of the refused paths. */
-function removedAt(mountRoot: string, ref: string, problem: TrackedDerivedOutputError): boolean {
-	const listed = runGit(mountRoot, ["ls-tree", "-r", "-z", "--name-only", ref, "--", ...problem.paths]);
+/**
+ * Whether `ref` tracks none of `paths`. Every path the engine forbids is
+ * checked, not only the first refusal, so a partially migrated tip is refused.
+ */
+function removedAt(mountRoot: string, ref: string, paths: readonly string[]): boolean {
+	const listed = runGit(mountRoot, ["ls-tree", "-r", "-z", "--name-only", ref, "--", ...paths]);
 	return listed.status === 0 && listed.stdout.split("\0").filter(Boolean).length === 0;
 }
 

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { loadRepositoryDbConfig } from "../src/config.ts";
 import { pullRemote } from "../src/publish.ts";
@@ -131,6 +131,37 @@ describe("a checkout cloned before its data repository was migrated", () => {
 
 		const status = await host.refresh();
 		expect(status.available).toBe(false);
+		expect(git(env, ["rev-parse", "HEAD"]).trim()).toBe(head);
+	});
+});
+
+describe("a partially migrated published tip", () => {
+	test("tracking engine files and derived output, a tip that drops only the engine files is refused", async () => {
+		const fixture = createDerivedFixture();
+		fixtures.push(fixture);
+		const a = fixture.mountPath;
+		writeFileSync(path.join(a, ".gitignore"), "", "utf8");
+		writeFixtureDocument(a, "r1", { code: "A" });
+		expect(Bun.spawnSync(["sh", "scripts/materialize.sh"], { cwd: a }).exitCode).toBe(0);
+		mkdirSync(path.join(a, ".repository-db"), { recursive: true });
+		writeFileSync(path.join(a, ".repository-db/draft-owner.json"), "{}\n", "utf8");
+		git(a, ["add", "--all", "--force"]);
+		git(a, ["commit", "--message", "old style: engine files and derived output committed"]);
+		git(a, ["push", "--quiet", "origin", fixture.branch]);
+		const env = cloneFixture(fixture, "env");
+
+		git(a, ["rm", "-r", "--cached", "--quiet", "--", ".repository-db"]);
+		writeFileSync(path.join(a, ".gitignore"), "/.repository-db/\n", "utf8");
+		git(a, ["add", ".gitignore"]);
+		git(a, ["commit", "--message", "stop tracking engine files only"]);
+		git(a, ["push", "--quiet", "origin", fixture.branch]);
+
+		const head = git(env, ["rev-parse", "HEAD"]).trim();
+		const refused = await pullRemote(env, loadRepositoryDbConfig(env)).then(
+			() => undefined,
+			(error: unknown) => error,
+		);
+		expect(refused).toBeInstanceOf(TrackedDerivedOutputError);
 		expect(git(env, ["rev-parse", "HEAD"]).trim()).toBe(head);
 	});
 });
