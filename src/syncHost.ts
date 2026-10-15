@@ -1,4 +1,4 @@
-import { statSync } from "node:fs";
+import { realpathSync, statSync } from "node:fs";
 import path from "node:path";
 import { assertDataRepoBoundary, normalizeRemoteUrl } from "./boundary.ts";
 import { CONFIG_FILE_NAME } from "./config.ts";
@@ -69,8 +69,11 @@ export interface SyncHostOptions {
 	 * configuration names another remote or branch is refused with
 	 * `boundary_violation` — on open, before every read and mutation, and in the
 	 * background check — so nothing is fetched or pulled into the wrong data.
+	 * `within`, when set, also requires the checkout's real path (symbolic links
+	 * resolved) to lie inside that directory, typically the module root, so a
+	 * mount that is a link to a checkout elsewhere is refused the same way.
 	 */
-	expect?: { remote: string; branch: string } | undefined;
+	expect?: { remote: string; branch: string; within?: string | undefined } | undefined;
 	recordOf?: (
 		path: string,
 		collectionRecord: { collection: string; id: string } | null,
@@ -293,6 +296,28 @@ export function createSyncHost(options: SyncHostOptions): SyncHost {
 		];
 	}
 
+	/** The checkout's real path lies inside `expect.within`, links resolved. */
+	function assertWithin(): void {
+		const within = options.expect?.within;
+		if (within === undefined) return;
+		let real: string;
+		let root: string;
+		try {
+			real = realpathSync(mountRoot);
+			root = realpathSync(within);
+		} catch {
+			throw new RepositoryDbError(
+				"mount_unavailable",
+				`The data checkout ${mountRoot} is not available.`,
+			);
+		}
+		const relative = path.relative(root, real);
+		if (relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative))) return;
+		throw new BoundaryViolationError(
+			`The data checkout ${mountRoot} resolves to ${real}, outside ${within}. Nothing was read, fetched or pulled.`,
+		);
+	}
+
 	function assertExpected(config: RepositoryDb["config"]): void {
 		const expected = options.expect;
 		if (!expected) return;
@@ -327,6 +352,9 @@ export function createSyncHost(options: SyncHostOptions): SyncHost {
 	 * mount is the repo root, `origin` and the branch match (`boundary_violation`).
 	 */
 	function verifyLive(db: RepositoryDb): void {
+		// Cheap and checked every time: a swapped link must never be followed,
+		// whatever the configuration's stat says.
+		assertWithin();
 		let key: string;
 		try {
 			key = statKey();
@@ -366,6 +394,7 @@ export function createSyncHost(options: SyncHostOptions): SyncHost {
 		}
 		let opened: RepositoryDb;
 		try {
+			assertWithin();
 			opened = RepositoryDb.open(mountRoot);
 			assertExpected(opened.config);
 			identityFiles = resolveIdentityFiles();

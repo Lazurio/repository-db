@@ -8,9 +8,11 @@ standard for the card is [`draft-publish-standard.md`](draft-publish-standard.md
 ## Must
 
 1. **One sync host per data checkout**, created at server start:
-   `createSyncHost({ mountRoot, expect: { remote, branch } })`, then `start()`.
-   `expect` names the data repository the app serves. A checkout whose
-   configuration names another remote or branch is then refused with
+   `createSyncHost({ mountRoot, expect: { remote, branch, within } })`, then
+   `start()`. `expect` names the data repository the app serves, and `within`
+   the directory the checkout must really live in (usually the module root). A
+   checkout whose configuration names another remote or branch, or whose real
+   path (links resolved) lies outside `within`, is then refused with
    `boundary_violation`, and nothing is fetched or pulled into it. Do not wait
    for the checkout to exist: the host opens it when it appears.
 2. **Every mutation through `host.run(kind, db => …)`.** That covers record

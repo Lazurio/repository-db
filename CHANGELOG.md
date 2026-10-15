@@ -1,5 +1,13 @@
 # Changelog
 
+## 3.2.4 — 2026-10-15
+
+- **`expect.within`.** `createSyncHost({ expect: { remote, branch, within } })`
+  also requires the checkout's real path (symbolic links resolved) to lie
+  inside `within`, typically the module root. A mount that is a link to a
+  checkout elsewhere — at open, or swapped after a good open — is refused with
+  `boundary_violation` before any read, mutation, fetch or pull.
+
 ## 3.2.3 — 2026-10-15
 
 Gaps found in reviews of consumer apps, fixed in the sync host:
