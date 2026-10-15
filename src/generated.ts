@@ -61,7 +61,14 @@ export function boundedOutput(text: string): string {
 		kept = Buffer.from(kept).subarray(0, MAX_OUTPUT_BYTES).toString("utf8").replace(/\uFFFD$/, "");
 		shortened = true;
 	}
-	return shortened ? `${kept}\n… (output shortened)` : kept;
+	if (!shortened) return kept;
+	const marker = "\n… (output shortened)";
+	// The marker is part of the budget: the whole report stays within the cap.
+	const room = MAX_OUTPUT_BYTES - Buffer.byteLength(marker);
+	if (Buffer.byteLength(kept) > room) {
+		kept = Buffer.from(kept).subarray(0, room).toString("utf8").replace(/\uFFFD$/, "");
+	}
+	return `${kept}${marker}`;
 }
 
 /** Run one data-repo command with cwd = mount root, off the event loop. */
@@ -81,9 +88,10 @@ function runCommand(command: string, mountRoot: string): Promise<CommandOutcome>
 					resolve({ ok: true });
 					return;
 				}
-				// The command's own words first; Node's message only when it said
-				// nothing (it repeats stderr after "Command failed: …").
-				const output = String(stderr ?? "").trim() || String(stdout ?? "").trim();
+				// The command's own words, both streams in a fixed order (stderr,
+				// then stdout); Node's message only when it said nothing (it repeats
+				// stderr after "Command failed: …").
+				const output = [String(stderr ?? "").trim(), String(stdout ?? "").trim()].filter(Boolean).join("\n");
 				const reason = error.killed ? `killed after ${COMMAND_TIMEOUT_MS / 1000} s` : `exit ${error.code ?? "?"}`;
 				resolve({ ok: false, detail: boundedOutput(output ? `${output}\n(${reason})` : error.message) });
 			},

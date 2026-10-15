@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { boundedOutput } from "../src/generated.ts";
 import { RepositoryDb } from "../src/repositoryDb.ts";
 import { RepositoryDbError } from "../src/types.ts";
 import { type FixtureRepo, cloneFixture, createDerivedFixture, git, writeFixtureDocument } from "./fixtures.ts";
@@ -173,3 +174,58 @@ describe("a validation conflict keeps the validator's explanation", () => {
 function fs_realTmp(): string {
 	return Bun.spawnSync(["sh", "-c", "cd \"${TMPDIR:-/tmp}\" && pwd -P"]).stdout.toString().trim();
 }
+
+describe("bounded command output", () => {
+	test("both streams are kept, stderr first, in a live validation failure and an integrated one", async () => {
+		const fixture = createDerivedFixture();
+		fixtures.push(fixture);
+		const a = fixture.mountPath;
+		const b = cloneFixture(fixture, "b");
+		writeFileSync(
+			path.join(a, "scripts/validate.sh"),
+			[
+				"dups=$(cat data/things/*.yaml 2>/dev/null | grep '^  code:' | sort | uniq -d)",
+				'if [ -n "$dups" ] || grep -qs "^  code: BAD$" data/things/*.yaml; then',
+				"  echo 'warning: noisy tool' >&2",
+				"  echo 'actual-hidden-rule'",
+				"  exit 4",
+				"fi",
+				"",
+			].join("\n"),
+			"utf8",
+		);
+		git(a, ["add", "--all"]);
+		git(a, ["commit", "--quiet", "--message", "a validator writing to both streams"]);
+		git(a, ["push", "--quiet", "origin", fixture.branch]);
+		const dbB = RepositoryDb.open(b);
+		await dbB.pull();
+
+		// Live failure.
+		writeFixtureDocument(b, "bad", { code: "BAD" });
+		const live = await errorOf(() => dbB.publish({ ...PUBLISH, expectedRevision: dbB.draftRevision() }));
+		expect(live.message).toContain("warning: noisy tool");
+		expect(live.message).toContain("actual-hidden-rule");
+		expect(live.message.indexOf("warning: noisy tool")).toBeLessThan(live.message.indexOf("actual-hidden-rule"));
+		rmSync(path.join(b, "data/things/bad.yaml"));
+
+		// Integrated failure.
+		const dbA = RepositoryDb.open(a);
+		writeFixtureDocument(a, "first", { code: "DUP" });
+		await dbA.publish({ ...PUBLISH, expectedRevision: dbA.draftRevision() });
+		writeFixtureDocument(b, "second", { code: "DUP" });
+		const integrated = await errorOf(() => dbB.publish({ ...PUBLISH, expectedRevision: dbB.draftRevision() }));
+		expect(integrated.code).toBe("publish_conflict");
+		expect(dbB.conflict()?.message).toContain("actual-hidden-rule");
+		expect(dbB.conflict()?.message).toContain("warning: noisy tool");
+	});
+
+	test("the shortening marker fits inside the byte budget", () => {
+		const out = boundedOutput("x".repeat(8192));
+		expect(Buffer.byteLength(out)).toBeLessThanOrEqual(4096);
+		expect(out.endsWith("… (output shortened)")).toBe(true);
+		const lines = boundedOutput(Array.from({ length: 40 }, (_, i) => `line ${i}`).join("\n"));
+		expect(Buffer.byteLength(lines)).toBeLessThanOrEqual(4096);
+		expect(lines).toContain("line 19");
+		expect(lines).not.toContain("line 20");
+	});
+});
