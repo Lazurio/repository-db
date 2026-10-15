@@ -143,7 +143,7 @@ export class RepositoryDb {
 
 	/** Publish the confirmed draft revision as one commit and send it. */
 	publish(options: PublishOptions): Promise<PublishResult> {
-		return publish(this.mountRoot, this.config, options);
+		return noteIncoming(this, publish(this.mountRoot, this.config, options));
 	}
 
 	/**
@@ -151,7 +151,7 @@ export class RepositoryDb {
 	 * a send the engine stopped with a conflict. Never makes a commit.
 	 */
 	finishSend(options: FinishSendOptions): Promise<PublishResult> {
-		return finishSend(this.mountRoot, this.config, options);
+		return noteIncoming(this, finishSend(this.mountRoot, this.config, options));
 	}
 
 	/**
@@ -159,7 +159,7 @@ export class RepositoryDb {
 	 * records; never merges into local work.
 	 */
 	pull(options: PullOptions = {}): Promise<PullResult> {
-		return pullRemote(this.mountRoot, this.config, options);
+		return noteIncoming(this, pullRemote(this.mountRoot, this.config, options));
 	}
 
 	/**
@@ -226,4 +226,29 @@ export class RepositoryDb {
 	markConflictResolved(): void {
 		markConflictResolved(this.mountRoot);
 	}
+}
+
+/**
+ * Colleagues' paths this facade's own publish, finish-send and pull brought into
+ * the checkout, waiting for the sync host to announce them. Internal: the host
+ * reads it after a mutation, whatever the app's callback returned.
+ */
+const incoming = new WeakMap<RepositoryDb, string[]>();
+
+async function noteIncoming<T extends { remoteChanges?: string[] | undefined }>(
+	db: RepositoryDb,
+	operation: Promise<T>,
+): Promise<T> {
+	const result = await operation;
+	if (result.remoteChanges && result.remoteChanges.length > 0) {
+		incoming.set(db, [...(incoming.get(db) ?? []), ...result.remoteChanges]);
+	}
+	return result;
+}
+
+/** Take (and clear) the incoming paths recorded on this facade. */
+export function takeIncomingChanges(db: RepositoryDb): string[] {
+	const paths = incoming.get(db) ?? [];
+	incoming.delete(db);
+	return [...new Set(paths)];
 }
