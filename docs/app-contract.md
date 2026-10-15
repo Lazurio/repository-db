@@ -28,40 +28,52 @@ standard for the card is [`draft-publish-standard.md`](draft-publish-standard.md
 4. **Call `db.ensureGenerated()` before reading a derived path** (anything
    declared in `generated_manifest`). It returns at once when the output is
    current.
-5. **Write records with their base revision.** Use `Collection.put/remove`, or
+5. **Touch record files only through the engine's path checks.** `Collection`
+   and `writeRecordDraft` refuse a path outside the data checkout
+   (`boundary_violation`). They also refuse one reached through a symbolic link
+   anywhere below the mount root (`symlink_refused`): `data/` itself, a
+   collection or nested directory, or the file. An app that reads files itself
+   uses `readDataFile(mountRoot, relativePath)` (`null` when absent). An app
+   that writes them itself, inside a `writeRecordDraft` callback, writes to the
+   path `assertDataPath(mountRoot, relativePath)` returned. A read through a
+   link could return a file from outside the checkout, and a write could create
+   one there.
+6. **Write records with their base revision.** Use `Collection.put/remove`, or
    `writeRecordDraft` for layouts a Collection does not describe. A save carries
    the `baseRevision` of the version that was edited (`null` for a new record),
    and a stale save is refused with `record_changed`. Capture the revision
    **when the editor opens** the record (it comes with the read), never at save
    time. A revision read at save time always matches, so it would overwrite a
    colleague's change unseen.
-6. **Confirm what was shown.** Publish passes the `revision` the review returned.
+7. **Confirm what was shown.** Publish passes the `revision` the review returned.
    Finish-send passes the `pendingHead` the card shows. Discard passes the
    revision too.
-7. **Record provenance after a write:**
+8. **Record provenance after a write:**
    `db.recordOrigin(paths, { kind: "app", actor })`. It is information only.
-8. **Attribute records with a known identity.** When no verified sign-in names
+9. **Attribute records with a known identity.** When no verified sign-in names
    the author of a record (a local Environment without a hosted sign-in), use
    `await host.read((db) => db.identity())`. It returns `{ name, email }`, the
    identity this Environment commits with, resolved exactly like the publish
    preflight: configured or explicitly passed, never guessed. It returns `null`
    when there is none; record the author as unknown then, never a guess.
-9. **Render the card from the engine.** Build it with
+10. **Render the card from the engine.** Build it with
    `deriveDraftPanel({ status, conflict, revision, records, pullBlocked })` from
    `host.status()` plus the review, or use `DraftPublishPanel` from
    `@lazurio/repository-db/ui`. Wire only the actions you implement; the rest
    show as unavailable with a reason.
-10. **Forward host events to the browser** (SSE or similar). On `remote-pulled`
+11. **Forward host events to the browser** (SSE or similar). On `remote-pulled`
    (colleagues' records came in), reload the records named in `records` (or
    `paths`), and do the same after a discard. Every mounted view (lists, details,
    derived summaries) reloads, not only the one that triggered it. The host
    emits `remote-pulled` itself whenever a pull, a publish or a finish-send
    brought colleagues' work in, whatever your `run()` callback returns. If your
    record files are nested, pass `recordOf` to `createSyncHost`.
-11. **Surface the error codes below** in the user's language.
+12. **Surface the error codes below** in the user's language.
 
 ## Must not
 
+- Read or write record files with plain `fs` calls on a path it built itself;
+  use `Collection`, `writeRecordDraft`, `readDataFile` and `assertDataPath`.
 - Run Git on the data checkout in any form: `git commit`, `push`, `pull`,
   `fetch`, `rebase`, `merge`, `reset`, `stash`, `add`. The engine does all of
   it.

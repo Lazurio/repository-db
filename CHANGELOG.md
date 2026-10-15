@@ -15,6 +15,15 @@
   error. The same bound now applies to a live `validation_failed` and
   `materialize_failed`, which report the command's own output instead of
   repeating it after Node's "Command failed" line.
+- **Record files only through real directories inside the checkout.**
+  `writeRecordDraft` and `Collection` (`get`, `has`, `list`, `listIds`,
+  `revision`, `put`, `remove`) refuse a path outside the data checkout
+  (`boundary_violation`). They also refuse one with a symbolic link anywhere
+  below the mount root: `data/`, a collection or nested directory, or the file.
+  Each component is `lstat`ed, and the final read opens with `O_NOFOLLOW`
+  (`symlink_refused`). Nothing is read from, or created, outside. New exports
+  for apps that touch files themselves: `readDataFile(mountRoot,
+  relativePath): string | null` and `assertDataPath(mountRoot, path): string`.
 - Conflict handoffs name no host paths: the conflict record is
   `.repository-db/conflict.json` in the data checkout, and Git's messages about
   the throwaway integration lane say `<integration lane>`.
