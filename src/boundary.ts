@@ -39,6 +39,31 @@ export function normalizeRemoteUrl(url: string): string {
  * parent code repository, so every repository-db operation must pass here
  * first.
  */
+/**
+ * Where a push to `origin` really goes must be `data_repo.remote` too. Git
+ * applies `remote.origin.pushurl` and `url.*.pushInsteadOf` / `insteadOf`
+ * (from any config level) only when pushing, so the fetch URL alone does not
+ * say it. `git remote get-url --push --all` expands them; every URL a push
+ * would reach must match. Publish checks this before it commits, and the send
+ * again right before it pushes.
+ */
+export function assertPushTarget(mountRoot: string, config: RepositoryDbConfig): void {
+	const listed = runGit(mountRoot, ["remote", "get-url", "--push", "--all", "origin"]);
+	const urls = listed.stdout.split("\n").map((entry) => entry.trim()).filter(Boolean);
+	if (listed.status !== 0 || urls.length === 0) {
+		throw new BoundaryViolationError(
+			`cannot tell where a push to "origin" goes; expected ${config.dataRepo.remote}`,
+		);
+	}
+	const expected = normalizeRemoteUrl(config.dataRepo.remote);
+	const diverted = urls.filter((url) => normalizeRemoteUrl(url) !== expected);
+	if (diverted.length > 0) {
+		throw new BoundaryViolationError(
+			`a push to "origin" would go to ${diverted.map((url) => `"${url}"`).join(", ")}, but repository-db.yaml expects "${config.dataRepo.remote}". Remove remote.origin.pushurl or the url.*.pushInsteadOf / insteadOf rewrite that diverts it. Nothing was committed or pushed.`,
+		);
+	}
+}
+
 export function assertDataRepoBoundary(
 	mountRoot: string,
 	config: RepositoryDbConfig,
@@ -77,6 +102,7 @@ export function assertDataRepoBoundary(
 			`origin remote mismatch: repository has "${remote}", repository-db.yaml expects "${config.dataRepo.remote}"`,
 		);
 	}
+	assertPushTarget(resolvedMount, config);
 
 	// A data repository without a first commit has no branch to check yet;
 	// say so instead of failing in Git ("ambiguous argument 'HEAD'").
