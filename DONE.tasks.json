@@ -1,0 +1,75 @@
+{
+  "schema_version": "companiesascode.done_tasks.v1",
+  "scope": {
+    "id": "repository-db",
+    "name": "Repository DB",
+    "path": "modules/repository-db",
+    "owner": "workspace-steward"
+  },
+  "tasks": [
+    {
+      "id": "task-2026-10-04-801",
+      "title": "Add proven YAML semantic merge and safe pending-send retry to repository-db",
+      "status": "done",
+      "priority": "urgent",
+      "priority_rank": 1,
+      "assignee": "agent",
+      "priority_decider": "workspace-steward",
+      "priority_reason": "Deals publishing was blocked by a technically false conflict and normal concurrent editing was unusable.",
+      "created_at": "2026-10-03",
+      "updated_at": "2026-10-06",
+      "tags": [
+        "DEV-6614",
+        "mission-control",
+        "repository-db",
+        "yaml",
+        "publish",
+        "conflict-safety"
+      ],
+      "dev_code": "DEV-6614",
+      "summary": "Implement deterministic structural merge, bounded audit metadata handling, precise conflict evidence and explicit retry for engine-recorded clean pending sends; cover safe and unsafe fixtures.",
+      "risk_notes": [
+        "No broad last-write-wins behavior was introduced for business data."
+      ],
+      "acceptance_criteria": [
+        "Safe field-level and id-keyed-array merges send successfully without an engine conflict marker.",
+        "Every ambiguous business merge stays blocked and reports exact unresolved paths.",
+        "Retry refuses any changed pending head, dirty tree or external Git conflict."
+      ],
+      "links": [
+        {
+          "label": "Mission Control plan",
+          "path": "mission-control/plans/2026/10/DEV-6614-repository-db-semantic-publish-merge.yaml"
+        },
+        {
+          "label": "Repository DB pull request",
+          "path": "https://github.com/Lazurio/repository-db/pull/14"
+        }
+      ],
+      "planning": {
+        "plan_id": "mcplan-dev-6614",
+        "path": "mission-control/plans/2026/10/DEV-6614-repository-db-semantic-publish-merge.yaml",
+        "source": "mission-control",
+        "role": "planning_source"
+      },
+      "source": "mission-control",
+      "outcome": "The engine now structurally merges only proven-disjoint canonical YAML changes in its temporary send lane, preserves hard conflicts for unsafe cases, and allows retry only for the engine-recorded clean pending-send lane. The reviewed implementation was rebase-merged to main in c284970dc592cfe41aedb9d524b11c2dfa7d84c5.",
+      "completed_at": "2026-10-06",
+      "completed_by": "workspace-steward",
+      "evidence": [
+        {
+          "label": "Repository DB PR #14",
+          "path": "https://github.com/Lazurio/repository-db/pull/14"
+        },
+        {
+          "label": "Merged main commit",
+          "path": "c284970dc592cfe41aedb9d524b11c2dfa7d84c5"
+        },
+        {
+          "label": "Exact-head validation",
+          "path": "bun test: 176 pass, 0 fail; bunx tsc --noEmit: pass"
+        }
+      ]
+    }
+  ]
+}
