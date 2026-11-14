@@ -17,7 +17,7 @@ through a zod-compatible parser contract; the engine itself depends only on
 | [`docs/architecture.md`](docs/architecture.md) | the one-sync-path model: lifecycle, conflicts, state files, the gate, the sync host, derived output, configuration and identity rules |
 | [`docs/app-contract.md`](docs/app-contract.md) | what an app must and must not do, error codes to surface, a minimal wiring example |
 | [`docs/migrating-a-module.md`](docs/migrating-a-module.md) | converting a module (and its data repo) onto 3.2, step by step |
-| [`docs/operations.md`](docs/operations.md) | recovery per error code, with the exact commands |
+| [`docs/operations.md`](docs/operations.md) | recovery per error code, with the exact commands; the transport contract |
 | [`docs/draft-publish-standard.md`](docs/draft-publish-standard.md) | the user-facing Draft & Publish standard |
 | [`docs/review-surface-contract.md`](docs/review-surface-contract.md) | the review types an app adapter produces |
 | [`docs/deployment-model.md`](docs/deployment-model.md) | data generations as branches, mounting, deployments |
@@ -195,7 +195,34 @@ successful answer is reused in-process for five minutes, a failure never). Non-i
 environments (CI, hosted, client deployments) must provide an approved
 provider — GitHub App installation, deploy key via ssh-agent, or a
 preconfigured Git credential helper — otherwise publish fails in preflight,
-before touching the working tree.
+before touching the working tree. A host that must hold no credentials at all
+uses a transport instead (below).
+
+## Transport
+
+For a host that must not hold credentials for its data repositories, for
+example a production applications host whose apps run without any token.
+`REPOSITORY_DB_TRANSPORT` names the absolute path of an executable the host
+provides; it reaches the data repository for the engine, typically through a
+local service that alone holds the credentials.
+
+- The engine then runs no network Git (`fetch`, `push`, `clone`, `ls-remote`)
+  and no credential probe (`gh auth status`, `ssh-add`, `git credential fill`).
+  Fetch, push and the credential check are the command's `fetch`, `push` and
+  `check`, and the engine never falls back to Git.
+- The command answers with one JSON line on stdout; its exit code decides: 0
+  done, 1 not a fast-forward (push only; the engine fetches and integrates
+  again, at most three attempts), 2 refused for good (`transport_refused`), 3
+  unavailable for now. Anything else counts as 3.
+- The boundary guard, the gate, the lane rebase and semantic merge, validators,
+  conflicts, trailers and the commit identity stay exactly as they are. `init`
+  refuses (`transport_unsupported`): such a host never creates a data
+  repository.
+- Unset or empty, nothing changes.
+
+The contract, what the engine does with each answer and the recovery per code
+are in [`docs/operations.md`](docs/operations.md#transport); the deployment
+side is in [`docs/deployment-model.md`](docs/deployment-model.md#transport-a-host-without-credentials).
 
 ## Library usage
 

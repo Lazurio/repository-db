@@ -5,6 +5,7 @@ import { CONFIG_FILE_NAME, CONFIG_SCHEMA_VERSION, configToYamlValue } from "./co
 import { assertCredentials } from "./credentials.ts";
 import { runGit, runGitAsync, runGitOrThrow } from "./git.ts";
 import { ENGINE_DIR } from "./lock.ts";
+import { TRANSPORT_ENV, configuredTransport } from "./transport.ts";
 import { writeFileAtomic, toStableYaml } from "./yamlIo.ts";
 import {
 	type RepositoryDbConfig,
@@ -112,8 +113,17 @@ export interface InitResult {
  *   initial commit so the generation branch exists on the remote.
  * - On a non-empty repository, verifies the checkout matches the expected
  *   branch and config.
+ * - With `REPOSITORY_DB_TRANSPORT` set, refuses (`transport_unsupported`)
+ *   before anything: a host that reaches its data repositories through a
+ *   transport never creates, clones or bootstraps one.
  */
 export async function initDataRepo(options: InitOptions): Promise<InitResult> {
+	if (configuredTransport() !== undefined) {
+		throw new RepositoryDbError(
+			"transport_unsupported",
+			`init does not run with ${TRANSPORT_ENV} set: a host that reaches its data repositories through a transport never creates, clones or bootstraps one. Set the data repository up where Git may use credentials, and give this host a checkout of it. Nothing was created.`,
+		);
+	}
 	const mountPath = path.resolve(options.mountPath);
 	assertSafeRemote(options.remote);
 	assertSafeBranch(options.branch);

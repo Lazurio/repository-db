@@ -237,3 +237,14 @@ Every operation first checks four things:
 - every Git call runs as `git -C <mount>`.
 
 An operation started from a parent code repository is refused.
+
+## Network
+
+Fetch, push and the credential check are the engine's only network
+operations, and they go through one place, `src/git.ts`. By default they are
+Git (`git fetch origin`, `git push origin HEAD:<branch>`) and the credential
+preflight. On a host that must hold no credentials, `REPOSITORY_DB_TRANSPORT`
+names a command that does all three instead; the engine then runs no network
+Git and never falls back to it. Everything above — the boundary guard, the
+gate, the lane, validation, conflicts — is the same either way. The contract is
+in [`operations.md`](operations.md#transport).

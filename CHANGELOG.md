@@ -1,5 +1,52 @@
 # Changelog
 
+## 3.3.0 — 2026-11-14
+
+- **`REPOSITORY_DB_TRANSPORT`: a host without credentials.** A host that must
+  not hold credentials for its data repositories (for example a production
+  applications host whose apps run without any token) sets
+  `REPOSITORY_DB_TRANSPORT` to the absolute path of an executable it provides.
+  The engine then runs no network Git (`fetch`, `push`, `clone`, `ls-remote`)
+  and no credential probe (`gh auth status`, `ssh-add`, `git credential fill`):
+  fetch, push and the credential check are that command's `fetch`, `push` and
+  `check`, and the engine never falls back to Git. Unset or empty, the engine
+  behaves exactly as 3.2.6.
+- **The contract, `repository-db.transport.v1`.** Arguments `--mount` (the
+  checkout's real path), `--remote` and `--branch` (from `repository-db.yaml`,
+  never `origin`), `--deadline-ms` (the engine's limit minus 2 s: 58000, or
+  18000 for the sync host's background check), and for a push `--commit`
+  (HEAD) and `--expect` (the remote head the send integrated onto, or `none`).
+  No shell, cwd = the checkout, stdin closed, `GIT_TERMINAL_PROMPT=0`, SIGTERM
+  at the limit and SIGKILL 2 s later. stdout is one JSON line of at most
+  4 KiB; the exit code decides: 0 done, 1 not a fast-forward (push only), 2
+  refused for good, 3 unavailable for now. Any other exit, a signal, the limit,
+  an invalid answer or an outcome that does not go with the exit code counts as
+  3, and so does an exit 0 the checkout does not show: a fetch must name
+  `remote_head` and leave `refs/remotes/origin/<branch>` there, a push must
+  leave it at `--commit`.
+- **What the engine does with it.** Every fetch (publish, finish-send, pull,
+  status, the sync host's check and catch-up) and the push go through the
+  transport. A push that is not a fast-forward is integrated again exactly as
+  before, fetching through the transport (at most three attempts); when the
+  host refuses that fetch, the send stops with `transport_refused` and the
+  host's reason. New codes:
+  `transport_refused` (final and never retried; the checkout returns to the
+  confirmed commit, which waits as `committed_not_pushed`),
+  `transport_unavailable` (also for a path that is not an absolute
+  executable) and `transport_unsupported` (`init`, which such a host never
+  runs). An unavailable push or fetch in a send is `publish_push_failed`
+  (`committed_not_pushed`), as with an unreachable remote; in the sync host a
+  failed fetch is `fetchError` with the transport's code. The credential check
+  has the mechanism `transport` and is cached for five minutes like the Git
+  preflight; a failing one is `credentials` with the transport's detail.
+- **Unchanged:** the boundary guard (including `assertPushTarget`), the gate,
+  the lane rebase and semantic merge, validators, conflicts, trailers and the
+  commit identity.
+- Every network command, Git or the transport, runs through one bounded runner
+  in `src/git.ts`. Docs: the contract and recovery in `docs/operations.md`
+  (Transport), the deployment side in `docs/deployment-model.md`, the new codes
+  in `docs/app-contract.md`.
+
 ## 3.2.6 — 2026-10-15
 
 - **A checkout cloned before its data repository was migrated catches up by

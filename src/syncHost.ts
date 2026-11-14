@@ -98,7 +98,11 @@ export interface SyncHostStatus {
 	draftOwner: DraftOwner | null;
 	/** The engine refused the last pull because the draft changes the same records. */
 	pullBlocked: { paths: string[]; message: string } | null;
-	/** The last fetch failed (offline, credentials): remote freshness is unknown. */
+	/**
+	 * The last fetch failed (offline, credentials; with a transport
+	 * `transport_unavailable`, or `transport_refused` when the host refuses this
+	 * data repository): remote freshness is unknown.
+	 */
 	fetchError: SyncHostProblem | null;
 	checkedAt: string;
 }
@@ -155,7 +159,7 @@ export interface SyncHost {
 }
 
 const DEFAULT_INTERVAL_MS = 30_000;
-/** Deadline of the background fetch, which runs in the mutation queue. */
+/** Deadline of the background fetch, which runs in the mutation queue (a transport is told 2 s less). */
 const FETCH_TIMEOUT_MS = 20_000;
 
 /** One queue per checkout across every host in this process (a dev server may build two). */
@@ -576,7 +580,7 @@ export function createSyncHost(options: SyncHostOptions): SyncHost {
 				assertDataRepoBoundary(mountRoot, config);
 				assertExpected(config);
 				if (derivedOutputProblem(mountRoot, config)) {
-					await gitFetchAsync(mountRoot, FETCH_TIMEOUT_MS);
+					await gitFetchAsync(mountRoot, config.dataRepo, FETCH_TIMEOUT_MS);
 					fetchError = null;
 					pulled = await pullRemote(mountRoot, config, { fetch: false });
 				}
@@ -613,7 +617,7 @@ export function createSyncHost(options: SyncHostOptions): SyncHost {
 				return publishStatus();
 			}
 			try {
-				await gitFetchAsync(db.mountRoot, FETCH_TIMEOUT_MS);
+				await gitFetchAsync(db.mountRoot, db.config.dataRepo, FETCH_TIMEOUT_MS);
 				fetchError = null;
 			} catch (error) {
 				forgetIfGone(error);

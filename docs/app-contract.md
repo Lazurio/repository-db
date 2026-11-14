@@ -139,6 +139,8 @@ in [`operations.md`](operations.md).
 | `send_pending` | A publish is waiting to be sent; finish it first. |
 | `identity_missing` | This Environment has no Git name and e-mail; sign in to GitHub in the Launchpad. |
 | `credentials` | This Environment cannot reach the data repository; sign in. |
+| `transport_unavailable` | The data repository cannot be reached right now; nothing is lost. Try again later. |
+| `transport_refused` | This server may not write to this data repository. This is for the administrator; nothing is lost. |
 | `validation_failed` / `materialize_failed` | The data breaks a rule of the data repo. Nothing was published. |
 | `generated_side_effect` | A data-repo command misbehaved. Nothing was published. This is for the module owner. |
 | `config_changed` | The data repository's configuration changed. Update the app; nothing was lost. |

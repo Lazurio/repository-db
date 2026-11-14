@@ -134,7 +134,8 @@ Or publish your draft first. If it collides with theirs, the publish meets
 ## `publish_push_failed` / state `committed_not_pushed`
 
 **Meaning:** the commit was made, but the push failed: offline, credentials, or
-the remote refused. The commit waits, and nothing is lost.
+the remote refused (with a transport: unavailable for now). The commit waits,
+and nothing is lost.
 
 ```bash
 repository-db status --fetch                          # committed_not_pushed, ahead ≥ 1
@@ -195,6 +196,108 @@ copy of the cache is set back before the fast-forward and rebuilt afterwards;
 a data draft stays, under the ordinary pull rule. A published tip that still
 tracks the paths is refused with the migration, as before.
 
+## Transport
+
+For a host that must not hold credentials for its data repositories, for
+example a production applications host whose apps run without any token. The
+host provides one executable that reaches the data repository for the engine
+(typically through a local service that alone holds the credentials), and the
+app's environment names it:
+
+```bash
+REPOSITORY_DB_TRANSPORT=/absolute/path/to/transport
+```
+
+Unset or empty, nothing changes: the engine uses Git and its credential
+preflight as before. With it set:
+
+- The engine runs no network Git (`fetch`, `push`, `clone`, `ls-remote`) and no
+  credential probe (`gh auth status`, `ssh-add`, `git credential fill`). Fetch,
+  push and the credential check are the transport's, and the engine never falls
+  back to Git.
+- Everything else stays: the boundary guard (including where a push to `origin`
+  would go), the gate, the lane rebase and semantic merge, validators,
+  conflicts, at most three send attempts, trailers, and the commit identity
+  (the Git author of the checkout).
+- `init` refuses with `transport_unsupported`: such a host never creates,
+  clones or bootstraps a data repository.
+
+### The contract (`repository-db.transport.v1`)
+
+```text
+<transport> check --mount <mount> --remote <remote> --branch <branch> --deadline-ms <ms>
+<transport> fetch --mount <mount> --remote <remote> --branch <branch> --deadline-ms <ms>
+<transport> push  --mount <mount> --remote <remote> --branch <branch> --deadline-ms <ms> --commit <sha> --expect <sha|none>
+```
+
+- `--mount` is the real path of the data checkout. `--remote` and `--branch`
+  are `data_repo.remote` and `data_repo.branch` from `repository-db.yaml`, never
+  the URL of `origin`. `--commit` is HEAD, the commit the engine sends.
+  `--expect` is the `refs/remotes/origin/<branch>` the send integrated onto, or
+  `none` when that ref is missing; it only allows a quick refusal, the remote's
+  fast-forward check decides.
+- `--deadline-ms` is the engine's own limit minus 2 s: 58000 for a publish,
+  finish-send, pull and status, 18000 for the sync host's background check.
+- The engine runs the command without a shell, with cwd = the checkout, its own
+  environment plus `GIT_TERMINAL_PROMPT=0` and stdin closed. At its limit it
+  sends SIGTERM, and SIGKILL 2 s later.
+- stdout is exactly one JSON line of at most 4 KiB:
+
+  ```json
+  {"schema_version":"repository-db.transport.v1","operation":"push","outcome":"pushed","remote_head":"<sha>|null","detail":"<text, at most 2000 characters>"}
+  ```
+
+  stderr is free text without secrets; the engine keeps at most 4 KiB of it
+  in its message, as it does with Git's.
+
+The exit code decides, with an `outcome` that goes with it:
+
+| Exit | Meaning | `outcome` |
+| --- | --- | --- |
+| 0 | done | `ok` (check); `fetched` or `up-to-date` (fetch); `pushed` or `up-to-date` (push) |
+| 1 | push only: the remote branch moved, the commit is not a fast-forward of its tip | `rejected-non-fast-forward` |
+| 2 | refused for good: the host does not allow this repository or branch, a wrong argument, a bundle over the limit | `refused` |
+| 3 | unavailable for now: the service, its broker or GitHub, a limit inside the transport | `unavailable` |
+| anything else, a signal, the engine's limit, stdout that is not one valid answer, an outcome that does not go with the exit code | counts as 3 | — |
+
+- **`check`** confirms that the transport works for this remote and branch and
+  that the branch exists there. It changes nothing. A successful check is reused
+  for five minutes, like the Git preflight.
+- **`fetch`**: after exit 0, `refs/remotes/origin/<branch>` points at the remote
+  tip (`remote_head`) and all its objects are in the checkout. Nothing else
+  changes: working tree, index, HEAD and other refs stay.
+- **`push`** sends exactly `--commit` to `refs/heads/<branch>` of the declared
+  repository as a fast-forward: never forced, never a deletion, never another
+  ref. After exit 0, `refs/remotes/origin/<branch>` points at `--commit`, as Git
+  leaves it after a push; `up-to-date` means the branch already pointed there.
+
+The engine checks this after `fetch` and `push`. A `fetch` exit 0 must name
+`remote_head`, and the ref must show it; an older ref is no proof of a fetch. A
+`push` exit 0 must leave the ref at `--commit`. An exit 0 the checkout does not
+show counts as 3.
+
+### What the engine does with each answer
+
+| Answer | Engine |
+| --- | --- |
+| the transport is not an absolute path to an executable | `transport_unavailable`, already at the credential check; never Git instead |
+| `check` 0 | the preflight passes (mechanism `transport`) |
+| `check` 1, 2 or 3 | `credentials` with the transport's detail; nothing changed |
+| `fetch` 2 | `transport_refused`, final, not retried; the sync host reports it as `fetchError` |
+| `fetch` anything but 0 and 2 | in a send: once more after a moment, then `publish_push_failed` (`committed_not_pushed`); the sync host: `fetchError` `transport_unavailable`; pull and status: `transport_unavailable` |
+| `push` 1 | fetch through the transport; when the branch moved, integrate again and push, at most three attempts in all; when the host refuses that fetch, `transport_refused` with its reason, back on the confirmed commit; otherwise `publish_push_failed` |
+| `push` 2 | `transport_refused` at once, no new attempt; the checkout is back on the confirmed commit, which waits (`committed_not_pushed`) |
+| `push` 3 | `publish_push_failed` (`committed_not_pushed`), as with an unreachable remote |
+
+### Recovery
+
+| Code | Way out |
+| --- | --- |
+| `transport_unavailable` | The host's service, its broker or GitHub is unavailable for now, or `REPOSITORY_DB_TRANSPORT` is not an absolute path to an executable file. Fix the host. A commit that waits is sent with `repository-db finish-send --head <head>`; an app retries it. |
+| `transport_refused` | The host does not allow this data repository and branch (or the transport refused an argument). Final: the engine does not retry it. Once the host allows the pair, or the app is pointed at its own data repository, finish the send: `repository-db finish-send --head <head>`. |
+| `transport_unsupported` | `init` on a host with a transport. Create the data repository, and the host's checkout of it, where Git may use credentials. |
+| `credentials` (mechanism `transport`) | The transport's check did not pass; its detail says why. Nothing was changed. |
+
 ## Smaller refusals
 
 | Code | Way out |
@@ -205,7 +308,8 @@ tracks the paths is refused with the migration, as before.
 | `conflict_active` | Resolve the conflict first (`repository-db conflict`). |
 | `materialize_failed` / `validation_failed` | Fix the data or the data-repo command, then `repository-db validate`. |
 | `generated_side_effect` | A materializer or validator changed tracked files; fix it to write only declared paths. |
-| `credentials` | Sign in (`gh auth login`), or configure the Environment's credential helper / deploy key (a key in `~/.ssh/config` is accepted when `git ls-remote` reaches the remote non-interactively). |
+| `credentials` | Sign in (`gh auth login`), or configure the Environment's credential helper / deploy key (a key in `~/.ssh/config` is accepted when `git ls-remote` reaches the remote non-interactively). With a transport, see [Transport](#transport). |
+| `transport_unavailable` / `transport_refused` / `transport_unsupported` | See [Transport](#transport). |
 | `symlink_refused` | A record path goes through a symbolic link (`data/`, a collection or nested directory, or the file). Nothing was read or written. Replace the link with a real directory or file inside the data checkout (`git -C <module>/db status` shows it as a change). |
 | `boundary_violation` (push diverted) | A push to `origin` would go elsewhere than `data_repo.remote`: `remote.origin.pushurl`, or a `url.*.pushInsteadOf` / `insteadOf` rewrite in the checkout's, global or system Git config. Nothing was committed or pushed. Check with `git -C <module>/db remote get-url --push --all origin`, then remove the override (`git -C <module>/db config --unset-all remote.origin.pushurl`, or the `url.*` entry wherever `git config --show-origin --get-regexp '^url\.'` lists it) and publish again. |
 | `boundary_violation` | Run the command against the data checkout itself, on its branch, with the right `origin`. In an app, the checkout may also be a different data repository than the one the app serves (`expect`), or a link resolving outside the module (`expect.within`): replace the mount with a real checkout of the app's data repository inside the module. |

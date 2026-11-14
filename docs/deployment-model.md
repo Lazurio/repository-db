@@ -119,4 +119,34 @@ verified before any working-tree mutation). Non-interactive environments
 GitHub App installation, deploy key via ssh-agent, or a preconfigured Git
 credential helper. With none present, publish fails in preflight with an
 explicit error before touching the working tree; this preflight is a hard
-gate before any hosted/client cutover.
+gate before any hosted/client cutover. A host that must hold no credentials
+at all uses a transport (below).
+
+## Transport: a host without credentials
+
+A host whose apps must not hold credentials for their data repositories — a
+production applications host, for example — sets `REPOSITORY_DB_TRANSPORT` in
+each app's environment to the absolute path of a transport command the host
+provides. The command reaches the data repository for the engine, usually
+through a local service that alone holds the credentials and allows only the
+data repositories and branches of that host's writing applications. The app
+never sees a token.
+
+- The engine fetches, pushes and checks access only through that command. It
+  runs no network Git and no credential probe, and never falls back to them.
+- The boundary guard, the publish lifecycle, the semantic merge, validators and
+  conflicts work as everywhere else; a publish commit is authored by the Git
+  identity of the host's checkout and carries the same trailers.
+- Such a host never creates a data repository: `init` refuses
+  (`transport_unsupported`). The data repository is created where Git may use
+  credentials, and the host's checkout is cloned by the host's operator on the
+  generation branch, with `origin` = `data_repo.remote`.
+- Agents in other Environments keep publishing to the same branch directly with
+  Git. Concurrent publishes are integrated by whichever side sends second, as
+  always; the transport adds no lock of its own.
+- A refusal by the host (`transport_refused`) is final and never retried; an
+  unavailable service (`transport_unavailable`, or `publish_push_failed` in a
+  send) leaves the commit waiting to be sent.
+
+The command's contract, what the engine does with each answer and the recovery
+per code are in [`operations.md`](operations.md#transport).
