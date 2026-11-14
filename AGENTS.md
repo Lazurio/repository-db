@@ -45,7 +45,12 @@ obsahu.
 - Při aktivním konfliktu jsou writes i publish blokované do explicitního
   `conflict --resolved` / `conflict --abort`.
 - Credential preflight nikdy nezapisuje credentials; jen ověřuje externí
-  mechanismus (gh, ssh-agent, credential helper) před mutací working tree.
+  mechanismus (gh, ssh-agent, credential helper, nebo `check` transportu) před
+  mutací working tree.
+- Síťové operace (fetch, push, kontrola přihlášení) jdou jen přes `src/git.ts`.
+  S `REPOSITORY_DB_TRANSPORT` je dělá příkaz hostitele (`src/transport.ts`) a
+  engine nespustí síťový Git ani sondu přihlášení a nikdy se ke Gitu nevrací;
+  `tests/transport.test.ts` to hlídá podvrženým `git` v `PATH`.
 
 ## Dokumentace
 
