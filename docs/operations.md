@@ -271,8 +271,10 @@ The exit code decides, with an `outcome` that goes with it:
   ref. After exit 0, `refs/remotes/origin/<branch>` points at `--commit`, as Git
   leaves it after a push; `up-to-date` means the branch already pointed there.
 
-The engine checks the ref after `fetch` and `push`: an exit 0 the checkout does
-not show counts as 3.
+The engine checks this after `fetch` and `push`. A `fetch` exit 0 must name
+`remote_head`, and the ref must show it; an older ref is no proof of a fetch. A
+`push` exit 0 must leave the ref at `--commit`. An exit 0 the checkout does not
+show counts as 3.
 
 ### What the engine does with each answer
 
@@ -283,7 +285,7 @@ not show counts as 3.
 | `check` 1, 2 or 3 | `credentials` with the transport's detail; nothing changed |
 | `fetch` 2 | `transport_refused`, final, not retried; the sync host reports it as `fetchError` |
 | `fetch` anything but 0 and 2 | in a send: once more after a moment, then `publish_push_failed` (`committed_not_pushed`); the sync host: `fetchError` `transport_unavailable`; pull and status: `transport_unavailable` |
-| `push` 1 | fetch through the transport; when the branch moved, integrate again and push, at most three attempts in all; otherwise `publish_push_failed` |
+| `push` 1 | fetch through the transport; when the branch moved, integrate again and push, at most three attempts in all; when the host refuses that fetch, `transport_refused` with its reason, back on the confirmed commit; otherwise `publish_push_failed` |
 | `push` 2 | `transport_refused` at once, no new attempt; the checkout is back on the confirmed commit, which waits (`committed_not_pushed`) |
 | `push` 3 | `publish_push_failed` (`committed_not_pushed`), as with an unreachable remote |
 

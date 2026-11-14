@@ -431,8 +431,9 @@ export async function transportCheckAsync(
  * Network fetch via the async runner (kill-on-timeout), or through the
  * transport when one is configured: then `refs/remotes/origin/<branch>` is
  * the remote tip afterwards, and nothing else in the checkout changes. A
- * refusal is `transport_refused` (final); every other failure is
- * `transport_unavailable`.
+ * transport's exit 0 counts only with a `remote_head` that this ref now shows;
+ * an older ref is no proof of a fresh fetch. A refusal is `transport_refused`
+ * (final); every other failure is `transport_unavailable`.
  */
 export async function gitFetchAsync(
 	repoRoot: string,
@@ -458,14 +459,16 @@ export async function gitFetchAsync(
 		undefined,
 	);
 	if (answer.code === 0) {
-		const tip = remoteTrackingHead(repoRoot, dataRepo.branch);
-		if (!tip || (answer.remoteHead !== null && tip !== answer.remoteHead)) {
-			answer = unconfirmed(
-				answer,
-				`the transport answered ${answer.outcome}, but refs/remotes/origin/${dataRepo.branch} is ${tip || "missing"}${
-					answer.remoteHead ? `, not ${answer.remoteHead}` : ""
-				}`,
-			);
+		if (answer.remoteHead === null) {
+			answer = unconfirmed(answer, `the transport answered ${answer.outcome} without naming the remote tip (remote_head)`);
+		} else {
+			const tip = remoteTrackingHead(repoRoot, dataRepo.branch);
+			if (tip !== answer.remoteHead) {
+				answer = unconfirmed(
+					answer,
+					`the transport answered ${answer.outcome} with remote_head ${answer.remoteHead}, but refs/remotes/origin/${dataRepo.branch} is ${tip || "missing"}`,
+				);
+			}
 		}
 	}
 	if (answer.code === 0) return;

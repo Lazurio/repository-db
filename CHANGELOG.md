@@ -21,12 +21,15 @@
   4 KiB; the exit code decides: 0 done, 1 not a fast-forward (push only), 2
   refused for good, 3 unavailable for now. Any other exit, a signal, the limit,
   an invalid answer or an outcome that does not go with the exit code counts as
-  3, and so does an exit 0 whose `refs/remotes/origin/<branch>` the checkout
-  does not show.
+  3, and so does an exit 0 the checkout does not show: a fetch must name
+  `remote_head` and leave `refs/remotes/origin/<branch>` there, a push must
+  leave it at `--commit`.
 - **What the engine does with it.** Every fetch (publish, finish-send, pull,
   status, the sync host's check and catch-up) and the push go through the
   transport. A push that is not a fast-forward is integrated again exactly as
-  before, fetching through the transport (at most three attempts). New codes:
+  before, fetching through the transport (at most three attempts); when the
+  host refuses that fetch, the send stops with `transport_refused` and the
+  host's reason. New codes:
   `transport_refused` (final and never retried; the checkout returns to the
   confirmed commit, which waits as `committed_not_pushed`),
   `transport_unavailable` (also for a path that is not an absolute

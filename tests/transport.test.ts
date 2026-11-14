@@ -34,7 +34,11 @@ interface FakeTransport {
 	ctl: string;
 	calls(): TransportCall[];
 	ops(): string[];
-	/** normal, refuse, unavailable, garbage, mismatch, two-lines, exit5, signal, hang; push also noref. */
+	/**
+	 * normal, refuse, unavailable, garbage, mismatch, two-lines, exit5, signal,
+	 * hang; fetch also null-head and stale-ref (exit 0 without moving the ref);
+	 * push also noref.
+	 */
 	mode(operation: Operation, mode: string): void;
 	/** A script the double runs before every push (a colleague publishing in between); null removes it. */
 	beforePush(script: string | null): void;
@@ -90,6 +94,8 @@ case "$mode" in
   exit5) line unavailable "" "an exit code outside the contract"; exit 5 ;;
   signal) kill -KILL $$ ;;
   hang) echo $$ > "$CTL/$op.pid"; exec sleep 30 ;;
+  null-head) answer 0 fetched "" "" ;;
+  stale-ref) answer 0 fetched "$("$GIT" ls-remote "$remote" "refs/heads/$branch" | cut -f1)" "" ;;
 esac
 case "$op" in
   check)
@@ -318,6 +324,31 @@ describe("REPOSITORY_DB_TRANSPORT: fetch and push through the host's command", (
 		expect(rev(fixture.originPath, fixture.branch)).toBe(rev(fixture.mountPath, "HEAD"));
 	});
 
+	test("a push that is not a fast-forward, then a fetch the host refuses: transport_refused with the host's reason, back on the confirmed commit", async () => {
+		const { fixture, transport, db, base } = setup();
+		const clone = cloneFixture(fixture, "colleague");
+		// The send integrates onto a colleague's commit first, so going back is visible.
+		colleaguePublishes(fixture, clone, "theirs", process.env);
+		// While the push is on its way another colleague publishes, and the host stops allowing the fetch.
+		const fetchMode = path.join(transport.ctl, "fetch.mode");
+		transport.beforePush(
+			`${colleagueScript(fixture, clone, path.join(fixture.root, "count"))}echo refuse > ${quote(fetchMode)}\n`,
+		);
+		writeFixtureDocument(fixture.mountPath, "mine", { name: "Mine" });
+
+		const failure = await publishDraft(db).catch((error: unknown) => error);
+
+		expect(failure).toMatchObject({ code: "transport_refused" });
+		const message = (failure as Error).message;
+		expect(message).toMatch(/not a data repository of a writer application on this host/);
+		expect(message).toMatch(/committed_not_pushed/);
+		// One push, the refused fetch, no new attempt.
+		expect(transport.ops()).toEqual(["check", "fetch", "push", "fetch"]);
+		expect(rev(fixture.mountPath, "HEAD^")).toBe(base);
+		expect(db.status().state).toBe("committed_not_pushed");
+		expect(db.conflict()).toBeUndefined();
+	});
+
 	test("an unavailable push is publish_push_failed with committed_not_pushed and no new attempt; finishing the send later sends it", async () => {
 		const { fixture, transport, db } = setup();
 		transport.mode("push", "unavailable");
@@ -397,6 +428,24 @@ describe("REPOSITORY_DB_TRANSPORT: answers the engine does not trust count as un
 				(error: unknown) => error,
 			);
 			expect(failure).toMatchObject({ code: "transport_unavailable" });
+		});
+	}
+
+	for (const mode of ["null-head", "stale-ref"]) {
+		test(`a fetch that answers fetched without moving refs/remotes/origin (${mode}) is never taken as fresh`, async () => {
+			const { fixture, transport, db } = setup();
+			const clone = cloneFixture(fixture, "colleague");
+			colleaguePublishes(fixture, clone, "theirs", process.env);
+			transport.mode("fetch", mode);
+
+			// The old tracking ref is still there; it is no proof of a fetch.
+			await expect(db.statusAsync({ fetch: true })).rejects.toMatchObject({ code: "transport_unavailable" });
+			const host = createSyncHost({ mountRoot: fixture.mountPath, intervalMs: 0 });
+			expect((await host.refresh()).fetchError?.code).toBe("transport_unavailable");
+			expect(existsSync(path.join(fixture.mountPath, "data/things/theirs.yaml"))).toBe(false);
+
+			transport.mode("fetch", "normal");
+			expect((await db.statusAsync({ fetch: true })).behind).toBe(1);
 		});
 	}
 

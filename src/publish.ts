@@ -554,20 +554,25 @@ async function send(
 		}
 		// Rejected because a colleague published in the meantime? Then the next
 		// attempt integrates their work too. Any other refusal is final.
+		let refusedFetch: RepositoryDbError | undefined;
 		if (push.retry && attempt < MAX_SEND_ATTEMPTS && remoteHead) {
-			const moved = await gitFetchAsync(mountRoot, config.dataRepo).then(
-				() => remoteHeadOf(mountRoot, branch) !== remoteHead,
-				() => false,
+			const after = await gitFetchAsync(mountRoot, config.dataRepo).then(
+				() => ({ moved: remoteHeadOf(mountRoot, branch) !== remoteHead, refused: undefined }),
+				// The host's transport refusing this fetch is final as well and
+				// keeps its own reason; any other failed fetch reports the push.
+				(error: unknown) => ({ moved: false, refused: transportRefusal(error) }),
 			);
-			if (moved) {
+			if (after.moved) {
 				fetched = true;
 				continue;
 			}
+			refusedFetch = after.refused;
 		}
 		// Back to the confirmed commit: the integration is redone on the next
 		// attempt, and a recorded conflict keeps naming the commit it was for.
 		const now = gitHeadCommit(mountRoot);
 		if (localHead && now !== localHead) runGitOrThrow(mountRoot, ["reset", "--keep", localHead]);
+		if (refusedFetch) throw refusedFetch;
 		if (push.refused) {
 			throw new RepositoryDbError(
 				"transport_refused",
