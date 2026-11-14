@@ -11,7 +11,10 @@ import { ENGINE_DIR } from "./lock.ts";
 import type { RepositoryDbConfig, SyncStatus } from "./types.ts";
 
 export interface StatusOptions {
-	/** Run `git fetch origin` first so `behind` reflects the actual remote. */
+	/**
+	 * Fetch first (`git fetch origin`, or the host's transport) so `behind`
+	 * reflects the actual remote.
+	 */
 	fetch?: boolean;
 }
 
@@ -78,7 +81,7 @@ export async function deriveSyncStatusAsync(
 
 	let fetched = false;
 	if (options.fetch) {
-		await gitFetchAsync(mountRoot);
+		await gitFetchAsync(mountRoot, config.dataRepo);
 		fetched = true;
 	}
 

@@ -1,11 +1,23 @@
 import { type ChildProcess, execFile, spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
+import {
+	type TransportAnswer,
+	type TransportOperation,
+	type TransportRun,
+	configuredTransport,
+	describeTransportAnswer,
+	readTransportAnswer,
+	transportArgs,
+	transportDeadline,
+	transportUnavailable,
+	usableTransport,
+} from "./transport.ts";
 import { RepositoryDbError } from "./types.ts";
 
 /**
- * Terminate a timed-out git child: SIGTERM, then escalate to SIGKILL if it is
- * ignored. The escalation timer is cleared as soon as the child exits, so a
- * later, reused PID is never signalled.
+ * Terminate a timed-out child (git, or the transport): SIGTERM, then escalate
+ * to SIGKILL if it is ignored. The escalation timer is cleared as soon as the
+ * child exits, so a later, reused PID is never signalled.
  *
  * Scope note — no process-group / tree kill. The git process itself is killed;
  * a portable teardown of orphaned transport children (e.g. `ssh`) would need
@@ -77,6 +89,71 @@ export function runGit(
 	};
 }
 
+/** How a bounded child run ended. */
+type BoundedRun =
+	| { kind: "exited"; status: number; stdout: string; stderr: string }
+	| { kind: "failed"; message: string; signal: string | undefined; stderr: string }
+	| { kind: "timed-out" };
+
+/**
+ * The one runner for every network command of the engine — git, or the
+ * transport — off the event loop with a kill-on-timeout deadline. A numeric
+ * exit (zero or not) is `exited`; a spawn failure, a signal or an overflowing
+ * output is `failed`; the deadline is `timed-out`, and the child is terminated.
+ */
+function runBounded(
+	bin: string,
+	args: string[],
+	options: { timeoutMs: number; maxBuffer: number; cwd?: string | undefined; closeStdin?: boolean | undefined },
+): Promise<BoundedRun> {
+	return new Promise<BoundedRun>((resolve) => {
+		let settled = false;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const child = execFile(
+			bin,
+			args,
+			{
+				encoding: "utf8",
+				env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+				maxBuffer: options.maxBuffer,
+				...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
+			},
+			(error, stdout, stderr) => {
+				if (timer) clearTimeout(timer);
+				if (settled) return; // already settled by the timeout path
+				settled = true;
+				if (error) {
+					const err = error as NodeJS.ErrnoException & { signal?: unknown };
+					if (typeof err.code === "number") {
+						resolve({ kind: "exited", status: err.code, stdout: stdout ?? "", stderr: stderr ?? "" });
+						return;
+					}
+					resolve({
+						kind: "failed",
+						message: error.message,
+						signal: typeof err.signal === "string" ? err.signal : undefined,
+						stderr: stderr ?? "",
+					});
+					return;
+				}
+				resolve({ kind: "exited", status: 0, stdout: stdout ?? "", stderr: stderr ?? "" });
+			},
+		);
+		// No input: a child that reads stdin gets EOF instead of waiting.
+		if (options.closeStdin) child.stdin?.end();
+		timer = setTimeout(() => {
+			if (settled) return;
+			settled = true;
+			// Settle at the deadline and tear down the group immediately. We do
+			// NOT wait for the close callback: an orphaned child can hold the
+			// stdout pipe open, which would otherwise delay the answer past
+			// timeoutMs (the bug this guards against).
+			terminateGitChild(child);
+			resolve({ kind: "timed-out" });
+		}, options.timeoutMs);
+	});
+}
+
 /**
  * Async git runner for network ops with an explicit kill-on-timeout deadline.
  * A non-zero exit resolves with the git status (callers decide); only a spawn
@@ -84,61 +161,21 @@ export function runGit(
  * for the request path without `await` — that is the whole point of moving
  * fetch/pull/push off `spawnSync`.
  */
-export function runGitAsync(
+export async function runGitAsync(
 	repoRoot: string,
 	args: string[],
 	options: { timeoutMs?: number | undefined; gitBin?: string | undefined } = {},
 ): Promise<GitResult> {
 	const timeoutMs = options.timeoutMs ?? DEFAULT_GIT_NETWORK_TIMEOUT_MS;
-	const gitBin = options.gitBin ?? "git";
-	return new Promise<GitResult>((resolve, reject) => {
-		let settled = false;
-		let timer: ReturnType<typeof setTimeout> | undefined;
-		const child = execFile(
-			gitBin,
-			["-C", repoRoot, ...args],
-			{
-				encoding: "utf8",
-				env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
-				maxBuffer: 64 * 1024 * 1024,
-			},
-			(error, stdout, stderr) => {
-				if (timer) clearTimeout(timer);
-				if (settled) return; // already rejected by the timeout path
-				settled = true;
-				if (error) {
-					const err = error as NodeJS.ErrnoException;
-					if (typeof err.code === "number") {
-						resolve({ status: err.code, stdout: stdout ?? "", stderr: stderr ?? "" });
-						return;
-					}
-					reject(
-						new RepositoryDbError(
-							"git_unavailable",
-							`git could not be executed: ${error.message}`,
-						),
-					);
-					return;
-				}
-				resolve({ status: 0, stdout: stdout ?? "", stderr: stderr ?? "" });
-			},
-		);
-		timer = setTimeout(() => {
-			if (settled) return;
-			settled = true;
-			// Reject at the deadline and tear down the group immediately. We do
-			// NOT wait for the close callback: an orphaned child can hold the
-			// stdout pipe open, which would otherwise delay the rejection past
-			// timeoutMs (the bug this guards against).
-			terminateGitChild(child);
-			reject(
-				new RepositoryDbError(
-					"git_timeout",
-					`git ${args.join(" ")} timed out after ${timeoutMs}ms`,
-				),
-			);
-		}, timeoutMs);
+	const run = await runBounded(options.gitBin ?? "git", ["-C", repoRoot, ...args], {
+		timeoutMs,
+		maxBuffer: 64 * 1024 * 1024,
 	});
+	if (run.kind === "exited") return { status: run.status, stdout: run.stdout, stderr: run.stderr };
+	if (run.kind === "failed") {
+		throw new RepositoryDbError("git_unavailable", `git could not be executed: ${run.message}`);
+	}
+	throw new RepositoryDbError("git_timeout", `git ${args.join(" ")} timed out after ${timeoutMs}ms`);
 }
 
 export async function runGitAsyncOrThrow(
@@ -303,16 +340,207 @@ export function gitOperationInProgress(repoRoot: string): string | undefined {
 	return undefined;
 }
 
-/** Network fetch via the async runner (kill-on-timeout). */
+/**
+ * The data repository a network operation is for, as `repository-db.yaml`
+ * declares it. The transport is told these, never the URL of `origin`.
+ */
+export interface DataRepoTarget {
+	remote: string;
+	branch: string;
+}
+
+// Network operations of the engine live here and nowhere else: fetch, push and
+// the transport's credential check. With `REPOSITORY_DB_TRANSPORT` set they go
+// to that command (`transport.ts`) and never to Git's network; unset, they are
+// the Git commands they always were.
+
+/**
+ * Run the transport (an already checked absolute path) for one operation on a
+ * data checkout: no shell, cwd = the checkout's real path, stdin closed, the
+ * engine's environment plus `GIT_TERMINAL_PROMPT=0`, terminated at the
+ * deadline like network Git. Never throws for the run itself.
+ */
+async function runTransport(
+	transport: string,
+	operation: TransportOperation,
+	repoRoot: string,
+	dataRepo: DataRepoTarget,
+	timeoutMs: number,
+	push: { commit: string; expect: string | undefined } | undefined,
+): Promise<TransportAnswer> {
+	const run = await (async (): Promise<TransportRun> => {
+		let mount: string;
+		try {
+			mount = realpathSync(repoRoot);
+		} catch {
+			return { kind: "failed", reason: `the data checkout ${repoRoot} is not available`, stderr: "" };
+		}
+		const args = transportArgs(operation, {
+			mount,
+			remote: dataRepo.remote,
+			branch: dataRepo.branch,
+			deadlineMs: transportDeadline(timeoutMs),
+			...(push ?? {}),
+		});
+		const result = await runBounded(transport, args, {
+			timeoutMs,
+			maxBuffer: 1024 * 1024,
+			cwd: mount,
+			closeStdin: true,
+		});
+		if (result.kind === "exited") return result;
+		if (result.kind === "failed") {
+			return {
+				kind: "failed",
+				reason: result.signal
+					? `the transport was terminated by ${result.signal}`
+					: `the transport failed: ${result.message}`,
+				stderr: result.stderr,
+			};
+		}
+		return { kind: "timed-out", timeoutMs };
+	})();
+	return readTransportAnswer(operation, run);
+}
+
+/** A transport answer the engine refuses to act on: it said done, but the checkout does not show it. */
+function unconfirmed(answer: TransportAnswer, why: string): TransportAnswer {
+	return { code: 3, outcome: "unavailable", remoteHead: answer.remoteHead, detail: `${why}; ${answer.detail}` };
+}
+
+function remoteTrackingHead(repoRoot: string, branch: string): string {
+	return runGit(repoRoot, ["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${branch}^{commit}`]).stdout.trim();
+}
+
+/**
+ * The transport's credential check for this checkout's data repository: code 0
+ * means it can reach `data_repo.remote` and `data_repo.branch` exists there.
+ * Changes nothing in the checkout. An unusable transport path is
+ * `transport_unavailable`; every answer, good or bad, is returned.
+ */
+export async function transportCheckAsync(
+	repoRoot: string,
+	dataRepo: DataRepoTarget,
+	timeoutMs = DEFAULT_GIT_NETWORK_TIMEOUT_MS,
+): Promise<TransportAnswer> {
+	const transport = usableTransport(configuredTransport() ?? "");
+	return runTransport(transport, "check", repoRoot, dataRepo, timeoutMs, undefined);
+}
+
+/**
+ * Network fetch via the async runner (kill-on-timeout), or through the
+ * transport when one is configured: then `refs/remotes/origin/<branch>` is
+ * the remote tip afterwards, and nothing else in the checkout changes. A
+ * refusal is `transport_refused` (final); every other failure is
+ * `transport_unavailable`.
+ */
 export async function gitFetchAsync(
 	repoRoot: string,
+	dataRepo: DataRepoTarget,
 	timeoutMs?: number,
 	options: { gitBin?: string } = {},
 ): Promise<void> {
-	await runGitAsyncOrThrow(repoRoot, ["fetch", "--quiet", "origin"], {
-		timeoutMs,
-		gitBin: options.gitBin,
+	const configured = configuredTransport();
+	if (configured === undefined) {
+		await runGitAsyncOrThrow(repoRoot, ["fetch", "--quiet", "origin"], {
+			timeoutMs,
+			gitBin: options.gitBin,
+		});
+		return;
+	}
+	const transport = usableTransport(configured);
+	let answer = await runTransport(
+		transport,
+		"fetch",
+		repoRoot,
+		dataRepo,
+		timeoutMs ?? DEFAULT_GIT_NETWORK_TIMEOUT_MS,
+		undefined,
+	);
+	if (answer.code === 0) {
+		const tip = remoteTrackingHead(repoRoot, dataRepo.branch);
+		if (!tip || (answer.remoteHead !== null && tip !== answer.remoteHead)) {
+			answer = unconfirmed(
+				answer,
+				`the transport answered ${answer.outcome}, but refs/remotes/origin/${dataRepo.branch} is ${tip || "missing"}${
+					answer.remoteHead ? `, not ${answer.remoteHead}` : ""
+				}`,
+			);
+		}
+	}
+	if (answer.code === 0) return;
+	if (answer.code === 2) {
+		throw new RepositoryDbError(
+			"transport_refused",
+			`The host's transport refused to fetch ${dataRepo.remote}#${dataRepo.branch}; nothing was fetched, and it is not tried again until the host allows this data repository and branch. Detail: ${describeTransportAnswer("fetch", answer)}.`,
+		);
+	}
+	throw transportUnavailable(`could not fetch ${dataRepo.remote}#${dataRepo.branch} (${describeTransportAnswer("fetch", answer)})`);
+}
+
+/**
+ * The outcome of a push, for the send loop:
+ *  - `pushed`;
+ *  - `retry`: the remote may have moved (Git: any failed push; the transport:
+ *    code 1, not a fast-forward) — fetch and see;
+ *  - `refused`: the transport refused it for good (code 2);
+ *  - otherwise the remote could not be reached now (the transport: code 3).
+ */
+export type PushOutcome =
+	| { pushed: true }
+	| { pushed: false; transport: boolean; retry: boolean; refused: boolean; detail: string };
+
+/**
+ * Send HEAD to `data_repo.branch` of `origin` — `git push origin
+ * HEAD:<branch>`, or the transport's `push` with `--commit HEAD` and
+ * `--expect` the remote head the send integrated onto. The transport path
+ * never throws: whatever happens comes back as a {@link PushOutcome}.
+ */
+export async function gitPushAsync(
+	repoRoot: string,
+	dataRepo: DataRepoTarget,
+	options: { expect: string | undefined },
+): Promise<PushOutcome> {
+	const configured = configuredTransport();
+	if (configured === undefined) {
+		const push = await runGitAsync(repoRoot, ["push", "origin", `HEAD:${dataRepo.branch}`]);
+		if (push.status === 0) return { pushed: true };
+		return {
+			pushed: false,
+			transport: false,
+			retry: true,
+			refused: false,
+			detail: push.stderr.trim() || push.stdout.trim(),
+		};
+	}
+	let transport: string;
+	try {
+		transport = usableTransport(configured);
+	} catch (error) {
+		return { pushed: false, transport: true, retry: false, refused: false, detail: (error as Error).message };
+	}
+	const commit = gitHeadCommit(repoRoot) ?? "";
+	let answer = await runTransport(transport, "push", repoRoot, dataRepo, DEFAULT_GIT_NETWORK_TIMEOUT_MS, {
+		commit,
+		expect: options.expect,
 	});
+	if (answer.code === 0) {
+		const tip = remoteTrackingHead(repoRoot, dataRepo.branch);
+		if (tip !== commit) {
+			answer = unconfirmed(
+				answer,
+				`the transport answered ${answer.outcome}, but refs/remotes/origin/${dataRepo.branch} is ${tip || "missing"}, not ${commit}`,
+			);
+		}
+	}
+	if (answer.code === 0) return { pushed: true };
+	return {
+		pushed: false,
+		transport: true,
+		retry: answer.code === 1,
+		refused: answer.code === 2,
+		detail: describeTransportAnswer("push", answer),
+	};
 }
 
 /**

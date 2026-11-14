@@ -20,6 +20,7 @@ import {
 	gitFetchAsync,
 	gitHeadCommit,
 	gitOperationInProgress,
+	gitPushAsync,
 	gitRenameSources,
 	gitUnmergedPaths,
 	runGit,
@@ -348,21 +349,37 @@ function recordSendConflict(
 	throw new RepositoryDbError("publish_conflict", `${state.message}\n\n${state.handoff}`);
 }
 
-async function fetchForSend(mountRoot: string): Promise<void> {
+/**
+ * The host's transport refused (`transport_refused`): final, so it is never
+ * tried again in this send and never reported as an unreachable remote.
+ */
+function transportRefusal(error: unknown): RepositoryDbError | undefined {
+	if (!(error instanceof RepositoryDbError) || error.code !== "transport_refused") return undefined;
+	return new RepositoryDbError(
+		"transport_refused",
+		`${error.message} The commit stays waiting to be sent (committed_not_pushed); finish the send then.`,
+	);
+}
+
+async function fetchForSend(mountRoot: string, config: RepositoryDbConfig): Promise<void> {
 	try {
-		await gitFetchAsync(mountRoot);
-	} catch {
+		await gitFetchAsync(mountRoot, config.dataRepo);
+	} catch (error) {
+		const refused = transportRefusal(error);
+		if (refused) throw refused;
 		// Once more after a moment: another fetch in this repository (a host's
 		// background check, an agent's CLI) can hold the ref lock briefly.
 		await new Promise((resolve) => setTimeout(resolve, 500));
-		await retryFetch(mountRoot);
+		await retryFetch(mountRoot, config);
 	}
 }
 
-async function retryFetch(mountRoot: string): Promise<void> {
+async function retryFetch(mountRoot: string, config: RepositoryDbConfig): Promise<void> {
 	try {
-		await gitFetchAsync(mountRoot);
+		await gitFetchAsync(mountRoot, config.dataRepo);
 	} catch (error) {
+		const refused = transportRefusal(error);
+		if (refused) throw refused;
 		throw new RepositoryDbError(
 			"publish_push_failed",
 			`Could not reach the remote; the commit stays waiting to be sent (committed_not_pushed). Detail: ${(error as Error).message}`,
@@ -429,7 +446,7 @@ async function send(
 	const localHead = gitHeadCommit(mountRoot);
 	let fetched = false;
 	for (let attempt = 1; ; attempt += 1) {
-		if (!fetched) await fetchForSend(mountRoot);
+		if (!fetched) await fetchForSend(mountRoot, config);
 		fetched = false;
 		const head = gitHeadCommit(mountRoot);
 		const remoteHead = remoteHeadOf(mountRoot, branch);
@@ -527,16 +544,18 @@ async function send(
 			if (localHead && now !== localHead) runGitOrThrow(mountRoot, ["reset", "--keep", localHead]);
 			throw error;
 		}
-		const push = await runGitAsync(mountRoot, ["push", "origin", `HEAD:${branch}`]);
-		if (push.status === 0) {
+		// HEAD to the branch: `git push origin HEAD:<branch>`, or the transport's
+		// push of HEAD, expecting the remote head this attempt integrated onto.
+		const push = await gitPushAsync(mountRoot, config.dataRepo, { expect: remoteHead || undefined });
+		if (push.pushed) {
 			// The draft the provenance markers described is now published.
 			clearDraftProvenance(mountRoot);
 			return { pushed: true, remoteChanges: [...remoteChanges] };
 		}
 		// Rejected because a colleague published in the meantime? Then the next
 		// attempt integrates their work too. Any other refusal is final.
-		if (attempt < MAX_SEND_ATTEMPTS && remoteHead) {
-			const moved = await gitFetchAsync(mountRoot).then(
+		if (push.retry && attempt < MAX_SEND_ATTEMPTS && remoteHead) {
+			const moved = await gitFetchAsync(mountRoot, config.dataRepo).then(
 				() => remoteHeadOf(mountRoot, branch) !== remoteHead,
 				() => false,
 			);
@@ -549,11 +568,15 @@ async function send(
 		// attempt, and a recorded conflict keeps naming the commit it was for.
 		const now = gitHeadCommit(mountRoot);
 		if (localHead && now !== localHead) runGitOrThrow(mountRoot, ["reset", "--keep", localHead]);
+		if (push.refused) {
+			throw new RepositoryDbError(
+				"transport_refused",
+				`The host's transport refused the push to ${config.dataRepo.remote}#${branch}; nothing was sent, and it is not tried again until the host allows this data repository and branch. The commit stays waiting to be sent (committed_not_pushed); finish the send then. Detail: ${push.detail}.`,
+			);
+		}
 		throw new RepositoryDbError(
 			"publish_push_failed",
-			`git push failed; the commit stays waiting to be sent (committed_not_pushed). Finish the send to retry. Detail: ${
-				push.stderr.trim() || push.stdout.trim()
-			}`,
+			`${push.transport ? "The push through the host's transport failed" : "git push failed"}; the commit stays waiting to be sent (committed_not_pushed). Finish the send to retry. Detail: ${push.detail}`,
 		);
 	}
 }
@@ -582,7 +605,7 @@ export async function publish(
 	assertDataRepoBoundary(mountRoot, config);
 	assertDerivedOutputIgnored(mountRoot, config);
 	assertNoActiveConflict(mountRoot);
-	await assertCredentials(config.dataRepo.remote);
+	await assertCredentials(config.dataRepo.remote, { mount: mountRoot, branch: config.dataRepo.branch });
 
 	return gated(mountRoot, async () => {
 		assertNoActiveConflict(mountRoot);
@@ -698,7 +721,7 @@ export async function finishSend(
 
 	assertDataRepoBoundary(mountRoot, config);
 	assertDerivedOutputIgnored(mountRoot, config);
-	await assertCredentials(config.dataRepo.remote);
+	await assertCredentials(config.dataRepo.remote, { mount: mountRoot, branch: config.dataRepo.branch });
 
 	return gated(mountRoot, async () => {
 		const conflict = activeConflict(mountRoot);
@@ -785,7 +808,7 @@ export async function pullRemote(
 	const legacy = derivedOutputProblem(mountRoot, config);
 	assertNoActiveConflict(mountRoot);
 
-	if (options.fetch !== false) await gitFetchAsync(mountRoot);
+	if (options.fetch !== false) await gitFetchAsync(mountRoot, config.dataRepo);
 	const remoteRef = `refs/remotes/origin/${config.dataRepo.branch}`;
 	const forbidden = [ENGINE_DIR, ...config.generatedManifest.map((entry) => entry.path)];
 	if (legacy && !removedAt(mountRoot, remoteRef, forbidden)) throw legacy;

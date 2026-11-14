@@ -192,7 +192,7 @@ describe("phase 0: async network git with timeout", () => {
 			try {
 				// Inject the fake git directly — no global process.env.PATH
 				// mutation, so this test can never contaminate sibling tests.
-				await gitFetchAsync(fakeDir, 150, { gitBin: fakeGit });
+				await gitFetchAsync(fakeDir, { remote: fakeDir, branch: "v3" }, 150, { gitBin: fakeGit });
 				throw new Error("expected gitFetchAsync to time out");
 			} catch (error) {
 				code = (error as { code?: string }).code;

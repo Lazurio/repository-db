@@ -1,5 +1,7 @@
 import { execFile } from "node:child_process";
-import { CredentialsError } from "./types.ts";
+import { transportCheckAsync } from "./git.ts";
+import { TRANSPORT_ENV, configuredTransport, describeTransportAnswer, usableTransport } from "./transport.ts";
+import { CredentialsError, RepositoryDbError } from "./types.ts";
 
 /**
  * Credential preflight for private data repositories.
@@ -13,6 +15,11 @@ import { CredentialsError } from "./types.ts";
  * must configure an approved non-interactive provider instead: a GitHub App
  * installation, a deploy key via ssh-agent, or a preconfigured Git credential
  * helper. When none is detected the publish fails here, before any change.
+ *
+ * A host that holds no credentials at all sets `REPOSITORY_DB_TRANSPORT`
+ * (`transport.ts`). Then the preflight is the transport's `check` for the
+ * checkout's data repository and branch (mechanism `transport`), and none of
+ * the probes below runs.
  *
  * The check runs off the event loop (`gh auth status` asks GitHub over the
  * network) and a successful answer is reused for a short while in this
@@ -28,8 +35,21 @@ const CREDENTIAL_COMMAND_TIMEOUT_MS = 15_000;
 
 export interface CredentialCheck {
 	ok: boolean;
-	mechanism: "gh" | "ssh-agent" | "ssh-config" | "credential-helper" | "local-remote" | "none";
+	mechanism:
+		| "gh"
+		| "ssh-agent"
+		| "ssh-config"
+		| "credential-helper"
+		| "local-remote"
+		| "transport"
+		| "none";
 	detail: string;
+}
+
+/** The checkout a credential check is for; the transport checks this data repository and branch from it. */
+export interface CredentialTarget {
+	mount: string;
+	branch: string;
 }
 
 function isGithubRemote(remote: string): boolean {
@@ -135,11 +155,44 @@ export function clearCredentialCache(): void {
 	cache.clear();
 }
 
-export async function checkCredentials(remote: string): Promise<CredentialCheck> {
+export async function checkCredentials(remote: string, target?: CredentialTarget): Promise<CredentialCheck> {
+	const transport = configuredTransport();
+	if (transport !== undefined) return checkThroughTransport(transport, remote, target);
 	const key = `${ghBin()}\0${remote}`;
 	const cached = cache.get(key);
 	if (cached && Date.now() - cached.at < CREDENTIAL_CACHE_MS) return cached.check;
 	const check = await detectCredentials(remote);
+	if (check.ok) cache.set(key, { check, at: Date.now() });
+	else cache.delete(key);
+	return check;
+}
+
+/**
+ * The transport's `check`, cached like the Git preflight. Whether the
+ * transport is usable is asked on every call, before the cache: a path that
+ * is not an absolute executable is `transport_unavailable` at once.
+ */
+async function checkThroughTransport(
+	transport: string,
+	remote: string,
+	target: CredentialTarget | undefined,
+): Promise<CredentialCheck> {
+	usableTransport(transport);
+	if (!target) {
+		throw new RepositoryDbError(
+			"transport_unsupported",
+			`${TRANSPORT_ENV} is set, and only an operation on a data checkout can go through it. Nothing was changed.`,
+		);
+	}
+	const key = `transport\0${transport}\0${target.mount}\0${remote}\0${target.branch}`;
+	const cached = cache.get(key);
+	if (cached && Date.now() - cached.at < CREDENTIAL_CACHE_MS) return cached.check;
+	const answer = await transportCheckAsync(target.mount, { remote, branch: target.branch });
+	const check: CredentialCheck = {
+		ok: answer.code === 0,
+		mechanism: "transport",
+		detail: describeTransportAnswer("check", answer),
+	};
 	if (check.ok) cache.set(key, { check, at: Date.now() });
 	else cache.delete(key);
 	return check;
@@ -221,9 +274,17 @@ async function detectCredentials(remote: string): Promise<CredentialCheck> {
 	};
 }
 
-/** Throw a {@link CredentialsError} before any working-tree mutation. */
-export async function assertCredentials(remote: string): Promise<CredentialCheck> {
-	const check = await checkCredentials(remote);
+/**
+ * Throw a {@link CredentialsError} before any working-tree mutation. With a
+ * transport, `target` names the checkout whose data repository is checked.
+ */
+export async function assertCredentials(remote: string, target?: CredentialTarget): Promise<CredentialCheck> {
+	const check = await checkCredentials(remote, target);
+	if (!check.ok && check.mechanism === "transport") {
+		throw new CredentialsError(
+			`credential preflight failed for remote ${remote}: ${check.detail}. This host reaches its data repository only through ${TRANSPORT_ENV} and never falls back to Git credentials; the host's transport has to allow this data repository and branch. Nothing was changed.`,
+		);
+	}
 	if (!check.ok) {
 		throw new CredentialsError(
 			`credential preflight failed for remote ${remote}: ${check.detail}. ` +
