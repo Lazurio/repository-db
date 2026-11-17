@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { mergeCanonicalYamlThreeWay } from "../src/semanticYamlMerge.ts";
+import { createHash } from "node:crypto";
+import { readFileSync, writeFileSync } from "node:fs";
+import { RepositoryDb } from "../src/index.ts";
+import { recordRevisionFromBytes } from "../src/collections.ts";
+import { mergeCanonicalYamlThreeWay, mergedRevision } from "../src/semanticYamlMerge.ts";
+import { createFixtureRepo, writeFixtureDocument } from "./fixtures.ts";
 import { parseYaml, toStableYaml } from "../src/yamlIo.ts";
 
 type Thing = {
@@ -228,7 +233,7 @@ describe("mergeCanonicalYamlThreeWay", () => {
 		expect(merged.stage).toBe("approved");
 		expect(merged.updatedByName).toBe("Local editor");
 		// New content gets a new revision, never one side's.
-		expect(merged.revision).toMatch(/^merge-[0-9a-f]{32}$/);
+		expect(merged.revision).toMatch(/^merge-[0-9a-f]{64}$/);
 		expect(merged.revision).not.toBe("r-local");
 		expect(merged.revision).not.toBe("r-remote");
 		// The same two revisions merge to the same value on either side.
@@ -335,3 +340,55 @@ describe("mergeCanonicalYamlThreeWay", () => {
 		expect(result.unresolvedPaths).toEqual(["/record/document/revision"]);
 	});
 });
+
+describe("mergedRevision", () => {
+	const expected = (pair: [string, string]) =>
+		`merge-${createHash("sha256").update(JSON.stringify(pair)).digest("hex")}`;
+
+	test("is the whole SHA-256 of the JSON array of the two revisions in code-point order", () => {
+		expect(mergedRevision("r-b", "r-a")).toBe(expected(["r-a", "r-b"]));
+		expect(mergedRevision("r-a", "r-b")).toBe(expected(["r-a", "r-b"]));
+		expect(mergedRevision("r-a", "r-b")).toMatch(/^merge-[0-9a-f]{64}$/);
+	});
+
+	test("orders a character beyond the BMP after U+E000, by code point, not by UTF-16 unit", () => {
+		// "\uE000" is U+E000; "😀" is U+1F600, whose first UTF-16 unit (0xD83D) is below 0xE000.
+		expect(mergedRevision("😀", "\uE000")).toBe(expected(["\uE000", "😀"]));
+		expect(mergedRevision("\uE000", "😀")).toBe(expected(["\uE000", "😀"]));
+		expect(mergedRevision("a😀", "a\uE000")).toBe(expected(["a\uE000", "a😀"]));
+	});
+});
+
+describe("a write after a merge", () => {
+	test("is refused when based on either side's pre-merge version, and accepted on the merged one", () => {
+		const fixture = createFixtureRepo();
+		const base = { ...thing().record, revision: "r-base" };
+		writeFixtureDocument(fixture.mountPath, "thing-1", base);
+		const local = { ...base, amount: 110, updatedAt: "2026-10-03T10:00:00.000Z", revision: "r-local" };
+		const remote = { ...base, stage: "approved", updatedAt: "2026-10-02T10:00:00.000Z", revision: "r-remote" };
+		const document = (record: Record<string, unknown>) =>
+			toStableYaml({ schemaVersion: "thing.v3", id: "thing-1", record });
+		const merged = mergeCanonicalYamlThreeWay(document(base), document(local), document(remote));
+		expect(merged.ok).toBe(true);
+		const file = writeFixtureDocument(fixture.mountPath, "thing-1", local);
+		writeFileSync(file, merged.text as string, "utf8");
+		const mergedRecord = (parseYaml(readFileSync(file, "utf8")) as Thing).record as Thing["record"] & {
+			revision: string;
+		};
+		// The port's own check: neither side's write revision names the merged record.
+		expect([mergedRecord.revision === "r-local", mergedRecord.revision === "r-remote"]).toEqual([false, false]);
+
+		const things = RepositoryDb.open(fixture.mountPath).collection("things", { schemaVersion: "thing.v3" });
+		const next = { ...mergedRecord, amount: 200, revision: "r-next" };
+		for (const side of [local, remote]) {
+			const stale = recordRevisionFromBytes(Buffer.from(document(side), "utf8"));
+			expect(() => things.put("thing-1", next, {}, { baseRevision: stale })).toThrow(
+				expect.objectContaining({ code: "record_changed" }),
+			);
+		}
+		expect(readFileSync(file, "utf8")).toBe(merged.text as string);
+		things.put("thing-1", next, {}, { baseRevision: things.revision("thing-1") });
+		expect((things.get("thing-1")?.record as { revision: string }).revision).toBe("r-next");
+	});
+});
+

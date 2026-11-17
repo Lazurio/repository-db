@@ -122,7 +122,7 @@ function auditMetadataWinner(
 	// revision get a deterministic winner, by the order of the two revisions.
 	// It is audit metadata, not a business decision; records without one keep
 	// the 3.3.0 rule (no winner, the audit keys merge structurally).
-	if (revisions) return revisions.local > revisions.remote ? "local" : "remote";
+	if (revisions) return compareCodePoints(revisions.local, revisions.remote) > 0 ? "local" : "remote";
 	return undefined;
 }
 
@@ -142,13 +142,25 @@ function bothRevisionsChanged(
 	return { local: localRevision, remote: remoteRevision };
 }
 
-/** The revision of a merged record: a new value no single write had, the
- * same on every side that merges the same two revisions: they are sorted by
- * code point and encoded as a JSON array before hashing. */
-function mergedRevision(first: string, second: string): string {
-	const [low, high] = first < second ? [first, second] : [second, first];
-	// A JSON array encodes the pair unambiguously for any two strings.
-	return `merge-${createHash("sha256").update(JSON.stringify([low, high])).digest("hex").slice(0, 32)}`;
+/** Orders two strings by Unicode code points (not UTF-16 code units, which
+ * would put a character beyond the BMP before U+E000–U+FFFF). */
+function compareCodePoints(left: string, right: string): number {
+	const a = Array.from(left);
+	const b = Array.from(right);
+	for (let index = 0; index < Math.min(a.length, b.length); index += 1) {
+		const difference = (a[index] as string).codePointAt(0)! - (b[index] as string).codePointAt(0)!;
+		if (difference !== 0) return difference;
+	}
+	return a.length - b.length;
+}
+
+/** The revision of a merged record: a new value no single write had, the same
+ * on every side that merges the same two revisions. The two are sorted by code
+ * point and encoded as a JSON array, and the whole SHA-256 digest is used:
+ * `merge-<64 hex>`. */
+export function mergedRevision(first: string, second: string): string {
+	const pair = compareCodePoints(first, second) <= 0 ? [first, second] : [second, first];
+	return `merge-${createHash("sha256").update(JSON.stringify(pair)).digest("hex")}`;
 }
 
 function mergeRecord(
