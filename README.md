@@ -67,9 +67,13 @@ through a zod-compatible parser contract; the engine itself depends only on
   an operation id, never a counter); it travels with `updatedAt`, so a writer
   that sets it also sets `updatedAt` (ISO with milliseconds), or two
   concurrent edits of different fields stay a conflict on `/record/revision`.
-  When both sides replaced the revision, the merged record gets a new one,
-  `merge-<sha256 of a JSON array of the two revisions, sorted by code point>`, never either side's, and equal
-  timestamps pick the audit bundle by the order of the two revisions. The engine records unresolved files/fields with a handoff and
+  When the two sides differ and either carries a revision, the merged record
+  gets a new one, `merge-<sha256 of a JSON array of the two revisions, sorted by
+  code point, a side without one as null>`, never either side's: not when both
+  writers replaced it, not when a writer that kept `r0` meets one that wrote
+  `r1`, and a newly added revision is never dropped. Equal timestamps pick the
+  audit bundle by the order of the two revisions.
+  The engine records unresolved files/fields with a handoff and
   refuses further writes and publishes until `conflict --abort` (the commit
   returns to the draft), `finish-send --head <sha>` (retries the integration),
   or a conscious `conflict --resolved`. The checkout always stays on the local

@@ -158,9 +158,39 @@ function compareCodePoints(left: string, right: string): number {
  * on every side that merges the same two revisions. The two are sorted by code
  * point and encoded as a JSON array, and the whole SHA-256 digest is used:
  * `merge-<64 hex>`. */
-export function mergedRevision(first: string, second: string): string {
-	const pair = compareCodePoints(first, second) <= 0 ? [first, second] : [second, first];
+export function mergedRevision(first: string | null, second: string | null): string {
+	// A side without a revision is null, which sorts first.
+	const ordered = (a: string | null, b: string | null) =>
+		a === null ? -1 : b === null ? 1 : compareCodePoints(a, b);
+	const pair = ordered(first, second) <= 0 ? [first, second] : [second, first];
 	return `merge-${createHash("sha256").update(JSON.stringify(pair)).digest("hex")}`;
+}
+
+/** A record's write revision as one side has it, or null without one. */
+function revisionOf(record: Record<string, unknown>): string | null {
+	const value = own(record, "revision");
+	return typeof value === "string" ? value : null;
+}
+
+/**
+ * A merged record whose sides differ is content neither side's revision
+ * named. When either side carries a write revision, the merged record gets a
+ * new one derived from both (a side without one counts as null), so no
+ * revision ever names two contents: not when both writers replaced it, not
+ * when a writer that keeps it (r0) meets one that replaced it (r1), and a
+ * newly added revision is never dropped. Records without a revision on either
+ * side keep the 3.3.0 rules.
+ */
+function assignMergedRevision(
+	value: Record<string, unknown>,
+	local: Record<string, unknown>,
+	remote: Record<string, unknown>,
+): void {
+	const localRevision = revisionOf(local);
+	const remoteRevision = revisionOf(remote);
+	if (localRevision === null && remoteRevision === null) return;
+	if (equal(local, remote)) return;
+	value.revision = mergedRevision(localRevision, remoteRevision);
 }
 
 function mergeRecord(
@@ -194,10 +224,8 @@ function mergeRecord(
 			const selected = own(source, key);
 			if (selected !== MISSING) value[key] = selected;
 		}
-		// The merged record is new content: it never takes one side's revision.
-		const revisions = bothRevisionsChanged(base, local, remote);
-		if (revisions) value.revision = mergedRevision(revisions.local, revisions.remote);
 		usedAuditMetadataRule = true;
+		assignMergedRevision(value, local, remote);
 		return { value, unresolvedPaths, usedAuditMetadataRule };
 	}
 
@@ -207,6 +235,7 @@ function mergeRecord(
 		unresolvedPaths.push(...merged.unresolvedPaths);
 		usedAuditMetadataRule ||= merged.usedAuditMetadataRule;
 	}
+	if (pointer === "/record" && unresolvedPaths.length === 0) assignMergedRevision(value, local, remote);
 	return { value, unresolvedPaths, usedAuditMetadataRule };
 }
 

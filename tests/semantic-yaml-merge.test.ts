@@ -392,3 +392,59 @@ describe("a write after a merge", () => {
 	});
 });
 
+describe("mixed writers: one replaces the revision, the other keeps it or has none", () => {
+	const merge = (base: unknown, local: unknown, remote: unknown) =>
+		mergeCanonicalYamlThreeWay(toStableYaml(base), toStableYaml(local), toStableYaml(remote));
+	const recordOf = (text: string | undefined) => decode(text).record as Thing["record"] & { revision?: string };
+
+	test("a later writer that kept r0 does not leave r0 on the combined content", () => {
+		const base = { ...thing(), record: { ...thing().record, revision: "r0" } };
+		const local = structuredClone(base);
+		local.record.amount = 110;
+		local.record.revision = "r1";
+		local.record.updatedAt = "2026-10-02T10:00:00.000Z";
+		const remote = structuredClone(base);
+		remote.record.stage = "approved";
+		remote.record.updatedAt = "2026-10-03T10:00:00.000Z";
+		const result = merge(base, local, remote);
+		expect(result.ok).toBe(true);
+		const merged = recordOf(result.text);
+		expect([merged.amount, merged.stage]).toEqual([110, "approved"]);
+		expect(merged.revision).toBe(mergedRevision("r1", "r0"));
+		expect(merged.revision).not.toBe("r0");
+		expect(merged.revision).not.toBe("r1");
+	});
+
+	test("a newly added revision is never dropped by a later side without one", () => {
+		const base = thing();
+		const local = { ...thing(), record: { ...thing().record, amount: 110, revision: "r1", updatedAt: "2026-10-02T10:00:00.000Z" } };
+		const remote = { ...thing(), record: { ...thing().record, stage: "approved", updatedAt: "2026-10-03T10:00:00.000Z" } };
+		const result = merge(base, local, remote);
+		expect(result.ok).toBe(true);
+		expect(recordOf(result.text).revision).toBe(mergedRevision("r1", null));
+	});
+
+	test("without a timestamp winner the combined content still gets a new revision", () => {
+		const base = { ...thing(), record: { ...thing().record, revision: "r0" } };
+		const local = structuredClone(base);
+		local.record.amount = 110;
+		local.record.revision = "r1";
+		local.record.updatedAt = "2026-10-02T10:00:00.000Z";
+		const remote = structuredClone(base);
+		remote.record.stage = "approved";
+		const result = merge(base, local, remote);
+		expect(result.ok).toBe(true);
+		expect(recordOf(result.text).revision).toBe(mergedRevision("r1", "r0"));
+	});
+
+	test("records without a revision on either side keep the 3.3.0 merge", () => {
+		const result = merge(
+			thing(),
+			thing({ amount: 110, updatedAt: "2026-10-03T10:00:00.000Z" }),
+			thing({ stage: "approved", updatedAt: "2026-10-02T10:00:00.000Z" }),
+		);
+		expect(result.ok).toBe(true);
+		expect(recordOf(result.text).revision).toBeUndefined();
+	});
+});
+
