@@ -1,5 +1,23 @@
 # Changelog
 
+## 3.4.0 — 2026-11-18
+
+- **`record.revision` is audit metadata.** The record's write revision, which
+  an App's data port replaces with a new unique value on every write (Lazurio
+  Module Standard, "One data port under the tools"), now belongs to the audit
+  bundle with `record.updatedAt` and `record.updatedBy*`. When two concurrent
+  edits change different business fields, the semantic merge keeps the later
+  bundle instead of reporting a conflict on the revision.
+- **A merged record gets a new revision.** When both sides replaced
+  `record.revision`, the merged record gets `merge-<sha256 of a JSON array of
+  the two revisions, sorted by code point>`: new content never carries one side's revision, and both sides
+  compute the same value. With equal timestamps the audit bundle of the greater
+  revision is kept (audit metadata, not a business decision).
+- A competing business leaf stays a conflict; a revision changed on both sides
+  without a newer `updatedAt` stays a conflict on `/record/revision`; a nested
+  field named `revision` is business data. Records without `revision` behave
+  exactly as in 3.3.0.
+
 ## 3.3.0 — 2026-11-14
 
 - **`REPOSITORY_DB_TRANSPORT`: a host without credentials.** A host that must

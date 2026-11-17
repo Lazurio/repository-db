@@ -202,4 +202,136 @@ describe("mergeCanonicalYamlThreeWay", () => {
 			"/record/metadata/updatedByName",
 		]);
 	});
+
+	test("keeps the later write revision with its audit bundle when independent fields merge", () => {
+		const base = { ...thing(), record: { ...thing().record, revision: "r-base" } };
+		const local = structuredClone(base);
+		local.record.amount = 110;
+		local.record.updatedAt = "2026-10-03T10:00:00.000Z";
+		local.record.updatedByName = "Local editor";
+		local.record.revision = "r-local";
+		const remote = structuredClone(base);
+		remote.record.stage = "approved";
+		remote.record.updatedAt = "2026-10-02T10:00:00.000Z";
+		remote.record.updatedByName = "Remote editor";
+		remote.record.revision = "r-remote";
+
+		const result = mergeCanonicalYamlThreeWay(
+			toStableYaml(base),
+			toStableYaml(local),
+			toStableYaml(remote),
+		);
+		expect(result.ok).toBe(true);
+		expect(result.usedAuditMetadataRule).toBe(true);
+		const merged = decode(result.text).record as Thing["record"] & { revision: string };
+		expect(merged.amount).toBe(110);
+		expect(merged.stage).toBe("approved");
+		expect(merged.updatedByName).toBe("Local editor");
+		// New content gets a new revision, never one side's.
+		expect(merged.revision).toMatch(/^merge-[0-9a-f]{32}$/);
+		expect(merged.revision).not.toBe("r-local");
+		expect(merged.revision).not.toBe("r-remote");
+		// The same two revisions merge to the same value on either side.
+		const swapped = mergeCanonicalYamlThreeWay(
+			toStableYaml(base),
+			toStableYaml(remote),
+			toStableYaml(local),
+		);
+		expect((decode(swapped.text).record as unknown as { revision: string }).revision).toBe(merged.revision);
+	});
+
+	test("equal timestamps with two new revisions merge deterministically", () => {
+		const base = { ...thing(), record: { ...thing().record, revision: "r-base" } };
+		const local = structuredClone(base);
+		local.record.amount = 110;
+		local.record.updatedAt = "2026-10-03T10:00:00.000Z";
+		local.record.updatedByName = "Local editor";
+		local.record.revision = "r-a";
+		const remote = structuredClone(base);
+		remote.record.stage = "approved";
+		remote.record.updatedAt = "2026-10-03T10:00:00.000Z";
+		remote.record.updatedByName = "Remote editor";
+		remote.record.revision = "r-b";
+
+		const result = mergeCanonicalYamlThreeWay(
+			toStableYaml(base),
+			toStableYaml(local),
+			toStableYaml(remote),
+		);
+		expect(result.ok).toBe(true);
+		const merged = decode(result.text).record as Thing["record"] & { revision: string };
+		expect([merged.amount, merged.stage]).toEqual([110, "approved"]);
+		// The bundle of the greater revision ("r-b") wins the tie.
+		expect(merged.updatedByName).toBe("Remote editor");
+		expect(merged.revision).toMatch(/^merge-/);
+	});
+
+	test("equal timestamps without revisions keep the 3.3.0 rule", () => {
+		const result = mergeCanonicalYamlThreeWay(
+			toStableYaml(thing()),
+			toStableYaml(thing({ amount: 110, updatedAt: "2026-10-03T10:00:00.000Z", updatedByName: "Local" })),
+			toStableYaml(thing({ stage: "approved", updatedAt: "2026-10-03T10:00:00.000Z", updatedByName: "Remote" })),
+		);
+		expect(result.ok).toBe(false);
+		expect(result.unresolvedPaths).toEqual(["/record/updatedByName"]);
+	});
+
+	test("a competing business leaf stays a conflict even when both revisions changed", () => {
+		const base = { ...thing(), record: { ...thing().record, revision: "r-base" } };
+		const local = structuredClone(base);
+		local.record.amount = 110;
+		local.record.updatedAt = "2026-10-03T10:00:00.000Z";
+		local.record.revision = "r-local";
+		const remote = structuredClone(base);
+		remote.record.amount = 120;
+		remote.record.updatedAt = "2026-10-02T10:00:00.000Z";
+		remote.record.revision = "r-remote";
+
+		const result = mergeCanonicalYamlThreeWay(
+			toStableYaml(base),
+			toStableYaml(local),
+			toStableYaml(remote),
+		);
+		expect(result.ok).toBe(false);
+		expect(result.unresolvedPaths).toEqual(["/record/amount"]);
+	});
+
+	test("a revision changed on both sides without a newer updatedAt stays a conflict", () => {
+		const base = { ...thing(), record: { ...thing().record, revision: "r-base" } };
+		const local = structuredClone(base);
+		local.record.amount = 110;
+		local.record.revision = "r-local";
+		const remote = structuredClone(base);
+		remote.record.stage = "approved";
+		remote.record.revision = "r-remote";
+
+		const result = mergeCanonicalYamlThreeWay(
+			toStableYaml(base),
+			toStableYaml(local),
+			toStableYaml(remote),
+		);
+		expect(result.ok).toBe(false);
+		expect(result.unresolvedPaths).toEqual(["/record/revision"]);
+	});
+
+	test("does not treat a nested revision field as audit metadata", () => {
+		const base = {
+			...thing(),
+			record: { ...thing().record, document: { revision: "A", note: "base" } },
+		};
+		const local = structuredClone(base);
+		local.record.document.revision = "B";
+		local.record.updatedAt = "2026-10-03T10:00:00.000Z";
+		const remote = structuredClone(base);
+		remote.record.document.revision = "C";
+		remote.record.updatedAt = "2026-10-02T10:00:00.000Z";
+
+		const result = mergeCanonicalYamlThreeWay(
+			toStableYaml(base),
+			toStableYaml(local),
+			toStableYaml(remote),
+		);
+		expect(result.ok).toBe(false);
+		expect(result.unresolvedPaths).toEqual(["/record/document/revision"]);
+	});
 });
