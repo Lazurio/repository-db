@@ -8,12 +8,17 @@
   bundle with `record.updatedAt` and `record.updatedBy*`. When two concurrent
   edits change different business fields, the semantic merge keeps the later
   bundle instead of reporting a conflict on the revision.
-- **A merged record gets a new revision.** When the two sides differ and
-  either carries `record.revision` (both replaced it, or a writer that kept it
-  meets one that replaced or added it), the merged record gets `merge-<sha256 of a JSON array of
-  the two revisions, sorted by code point, a side without one as null>`: new content never carries one side's revision, and both sides
-  compute the same value. With equal timestamps the audit bundle of the greater
-  revision is kept (audit metadata, not a business decision).
+- **A merged record gets a new revision.** When both sides replaced
+  `record.revision` with new values, the merged record gets `merge-<sha256 of a
+  JSON array of the two revisions, sorted by code point>`: new content never
+  carries one side's revision, and both sides compute the same value. With
+  equal timestamps the audit bundle of the greater revision is kept (audit
+  metadata, not a business decision).
+- **Mixed writers are refused on the revision.** When the record carries a
+  revision but one side kept the base's or has none (a writer that does not
+  store a new revision per write), that side's revision does not name its
+  content, so the merge is refused on `/record/revision` instead of giving
+  two different contents one revision.
 - A competing business leaf stays a conflict; a revision changed on both sides
   without a newer `updatedAt` stays a conflict on `/record/revision`; a nested
   field named `revision` is business data. Records without `revision` behave

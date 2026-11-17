@@ -158,11 +158,8 @@ function compareCodePoints(left: string, right: string): number {
  * on every side that merges the same two revisions. The two are sorted by code
  * point and encoded as a JSON array, and the whole SHA-256 digest is used:
  * `merge-<64 hex>`. */
-export function mergedRevision(first: string | null, second: string | null): string {
-	// A side without a revision is null, which sorts first.
-	const ordered = (a: string | null, b: string | null) =>
-		a === null ? -1 : b === null ? 1 : compareCodePoints(a, b);
-	const pair = ordered(first, second) <= 0 ? [first, second] : [second, first];
+export function mergedRevision(first: string, second: string): string {
+	const pair = compareCodePoints(first, second) <= 0 ? [first, second] : [second, first];
 	return `merge-${createHash("sha256").update(JSON.stringify(pair)).digest("hex")}`;
 }
 
@@ -173,24 +170,25 @@ function revisionOf(record: Record<string, unknown>): string | null {
 }
 
 /**
- * A merged record whose sides differ is content neither side's revision
- * named. When either side carries a write revision, the merged record gets a
- * new one derived from both (a side without one counts as null), so no
- * revision ever names two contents: not when both writers replaced it, not
- * when a writer that keeps it (r0) meets one that replaced it (r1), and a
- * newly added revision is never dropped. Records without a revision on either
- * side keep the 3.3.0 rules.
+ * How a merged record whose sides differ gets its write revision. When both
+ * writers replaced the revision with new unique values, the pair names both
+ * contents, so the merged record gets a revision derived from it (never either
+ * side's). When the record carries a revision but a side kept the base's or
+ * has none, that side's revision does not name its content and no derived
+ * value could tell two such merges apart: the merge is refused on
+ * `/record/revision`, before any audit metadata is chosen. Records without a
+ * revision on either side keep the 3.3.0 rules.
  */
-function assignMergedRevision(
-	value: Record<string, unknown>,
+function revisionRule(
+	base: Record<string, unknown>,
 	local: Record<string, unknown>,
 	remote: Record<string, unknown>,
-): void {
-	const localRevision = revisionOf(local);
-	const remoteRevision = revisionOf(remote);
-	if (localRevision === null && remoteRevision === null) return;
-	if (equal(local, remote)) return;
-	value.revision = mergedRevision(localRevision, remoteRevision);
+): { kind: "kept" } | { kind: "refused" } | { kind: "derived"; revision: string } {
+	if (revisionOf(local) === null && revisionOf(remote) === null) return { kind: "kept" };
+	if (equal(local, remote)) return { kind: "kept" };
+	const revisions = bothRevisionsChanged(base, local, remote);
+	if (revisions === undefined) return { kind: "refused" };
+	return { kind: "derived", revision: mergedRevision(revisions.local, revisions.remote) };
 }
 
 function mergeRecord(
@@ -217,6 +215,11 @@ function mergeRecord(
 		return { value: MISSING, unresolvedPaths, usedAuditMetadataRule };
 	}
 
+	const rule = pointer === "/record" ? revisionRule(base, local, remote) : { kind: "kept" as const };
+	if (rule.kind === "refused") {
+		return { value: MISSING, unresolvedPaths: ["/record/revision"], usedAuditMetadataRule };
+	}
+
 	const winner = pointer === "/record" ? auditMetadataWinner(base, local, remote) : undefined;
 	if (winner) {
 		const source = winner === "local" ? local : remote;
@@ -225,7 +228,7 @@ function mergeRecord(
 			if (selected !== MISSING) value[key] = selected;
 		}
 		usedAuditMetadataRule = true;
-		assignMergedRevision(value, local, remote);
+		if (rule.kind === "derived") value.revision = rule.revision;
 		return { value, unresolvedPaths, usedAuditMetadataRule };
 	}
 
@@ -235,7 +238,7 @@ function mergeRecord(
 		unresolvedPaths.push(...merged.unresolvedPaths);
 		usedAuditMetadataRule ||= merged.usedAuditMetadataRule;
 	}
-	if (pointer === "/record" && unresolvedPaths.length === 0) assignMergedRevision(value, local, remote);
+	if (rule.kind === "derived" && unresolvedPaths.length === 0) value.revision = rule.revision;
 	return { value, unresolvedPaths, usedAuditMetadataRule };
 }
 
