@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import YAML from "yaml";
 import { toStableYaml } from "./yamlIo.ts";
 
@@ -68,11 +69,16 @@ function own(record: Record<string, unknown>, key: string): MergeValue {
 }
 
 function isAuditMetadataKey(pointer: string, key: string): boolean {
-	// Only the envelope's direct record audit bundle is non-domain metadata.
-	// A nested object can legitimately have business fields named updatedAt or
-	// updatedBy*, so treating those as a timestamp winner would silently make a
-	// business decision.
-	return pointer === "/record" && (key === "updatedAt" || key.startsWith("updatedBy"));
+	// Only the envelope's direct record audit bundle is non-domain metadata:
+	// `updatedAt`, `updatedBy*` and the record's write revision `revision`,
+	// which every writer replaces with a new unique value (Lazurio Module
+	// Standard, one data port). A nested object can legitimately have business
+	// fields named updatedAt, updatedBy* or revision, so treating those as part
+	// of the bundle would silently make a business decision.
+	return (
+		pointer === "/record" &&
+		(key === "updatedAt" || key === "revision" || key.startsWith("updatedBy"))
+	);
 }
 
 function parseIsoTimestamp(value: MergeValue): number | undefined {
@@ -89,8 +95,8 @@ function parseIsoTimestamp(value: MergeValue): number | undefined {
 /**
  * A record-level timestamp is audit metadata, not a domain decision. Once all
  * business children of an object merge safely, choose the later valid update
- * timestamp and the matching sibling `updatedBy*` values as one coherent
- * bundle. Any other metadata remains an ordinary structural value.
+ * timestamp and the matching sibling `updatedBy*` and `revision` values as one
+ * coherent bundle. Any other metadata remains an ordinary structural value.
  */
 function auditMetadataWinner(
 	base: Record<string, unknown>,
@@ -100,13 +106,89 @@ function auditMetadataWinner(
 	const baseAt = own(base, "updatedAt");
 	const localAt = own(local, "updatedAt");
 	const remoteAt = own(remote, "updatedAt");
-	if (equal(localAt, baseAt) || equal(remoteAt, baseAt) || equal(localAt, remoteAt)) {
-		return undefined;
-	}
+	if (equal(localAt, baseAt) || equal(remoteAt, baseAt)) return undefined;
+	if (equal(localAt, remoteAt) && !bothRevisionsChanged(base, local, remote)) return undefined;
 	const localTimestamp = parseIsoTimestamp(localAt);
 	const remoteTimestamp = parseIsoTimestamp(remoteAt);
-	if (localTimestamp === undefined || remoteTimestamp === undefined) return undefined;
-	return localTimestamp >= remoteTimestamp ? "local" : "remote";
+	const revisions = bothRevisionsChanged(base, local, remote);
+	if (
+		localTimestamp !== undefined &&
+		remoteTimestamp !== undefined &&
+		localTimestamp !== remoteTimestamp
+	) {
+		return localTimestamp > remoteTimestamp ? "local" : "remote";
+	}
+	// Equal or unusable timestamps: only records whose writers store a write
+	// revision get a deterministic winner, by the order of the two revisions.
+	// It is audit metadata, not a business decision; records without one keep
+	// the 3.3.0 rule (no winner, the audit keys merge structurally).
+	if (revisions) return compareCodePoints(revisions.local, revisions.remote) > 0 ? "local" : "remote";
+	return undefined;
+}
+
+/** The two new write revisions when both sides replaced the record's
+ * `revision` with different string values, else undefined. */
+function bothRevisionsChanged(
+	base: Record<string, unknown>,
+	local: Record<string, unknown>,
+	remote: Record<string, unknown>,
+): { local: string; remote: string } | undefined {
+	const baseRevision = own(base, "revision");
+	const localRevision = own(local, "revision");
+	const remoteRevision = own(remote, "revision");
+	if (typeof localRevision !== "string" || typeof remoteRevision !== "string") return undefined;
+	if (equal(localRevision, baseRevision) || equal(remoteRevision, baseRevision)) return undefined;
+	if (localRevision === remoteRevision) return undefined;
+	return { local: localRevision, remote: remoteRevision };
+}
+
+/** Orders two strings by Unicode code points (not UTF-16 code units, which
+ * would put a character beyond the BMP before U+E000–U+FFFF). */
+function compareCodePoints(left: string, right: string): number {
+	const a = Array.from(left);
+	const b = Array.from(right);
+	for (let index = 0; index < Math.min(a.length, b.length); index += 1) {
+		const difference = (a[index] as string).codePointAt(0)! - (b[index] as string).codePointAt(0)!;
+		if (difference !== 0) return difference;
+	}
+	return a.length - b.length;
+}
+
+/** The revision of a merged record: a new value no single write had, the same
+ * on every side that merges the same two revisions. The two are sorted by code
+ * point and encoded as a JSON array, and the whole SHA-256 digest is used:
+ * `merge-<64 hex>`. */
+export function mergedRevision(first: string, second: string): string {
+	const pair = compareCodePoints(first, second) <= 0 ? [first, second] : [second, first];
+	return `merge-${createHash("sha256").update(JSON.stringify(pair)).digest("hex")}`;
+}
+
+/** A record's write revision as one side has it, or null without one. */
+function revisionOf(record: Record<string, unknown>): string | null {
+	const value = own(record, "revision");
+	return typeof value === "string" ? value : null;
+}
+
+/**
+ * How a merged record whose sides differ gets its write revision. When both
+ * writers replaced the revision with new unique values, the pair names both
+ * contents, so the merged record gets a revision derived from it (never either
+ * side's). When the record carries a revision but a side kept the base's or
+ * has none, that side's revision does not name its content and no derived
+ * value could tell two such merges apart: the merge is refused on
+ * `/record/revision`, before any audit metadata is chosen. Records without a
+ * revision on either side keep the 3.3.0 rules.
+ */
+function revisionRule(
+	base: Record<string, unknown>,
+	local: Record<string, unknown>,
+	remote: Record<string, unknown>,
+): { kind: "kept" } | { kind: "refused" } | { kind: "derived"; revision: string } {
+	if (revisionOf(local) === null && revisionOf(remote) === null) return { kind: "kept" };
+	if (equal(local, remote)) return { kind: "kept" };
+	const revisions = bothRevisionsChanged(base, local, remote);
+	if (revisions === undefined) return { kind: "refused" };
+	return { kind: "derived", revision: mergedRevision(revisions.local, revisions.remote) };
 }
 
 function mergeRecord(
@@ -133,6 +215,11 @@ function mergeRecord(
 		return { value: MISSING, unresolvedPaths, usedAuditMetadataRule };
 	}
 
+	const rule = pointer === "/record" ? revisionRule(base, local, remote) : { kind: "kept" as const };
+	if (rule.kind === "refused") {
+		return { value: MISSING, unresolvedPaths: ["/record/revision"], usedAuditMetadataRule };
+	}
+
 	const winner = pointer === "/record" ? auditMetadataWinner(base, local, remote) : undefined;
 	if (winner) {
 		const source = winner === "local" ? local : remote;
@@ -141,6 +228,7 @@ function mergeRecord(
 			if (selected !== MISSING) value[key] = selected;
 		}
 		usedAuditMetadataRule = true;
+		if (rule.kind === "derived") value.revision = rule.revision;
 		return { value, unresolvedPaths, usedAuditMetadataRule };
 	}
 
@@ -150,6 +238,7 @@ function mergeRecord(
 		unresolvedPaths.push(...merged.unresolvedPaths);
 		usedAuditMetadataRule ||= merged.usedAuditMetadataRule;
 	}
+	if (rule.kind === "derived" && unresolvedPaths.length === 0) value.revision = rule.revision;
 	return { value, unresolvedPaths, usedAuditMetadataRule };
 }
 

@@ -59,10 +59,21 @@ through a zod-compatible parser contract; the engine itself depends only on
   deterministic three-way structural merge: independent map fields and
   unchanged-order objects keyed by `id` may combine; competing business leaves,
   unordered arrays, comments/aliases, noncanonical presentation, deletions and
-  ordering changes stay hard conflicts. Only direct `record.updatedAt` and
-  `record.updatedBy*` are audit metadata: when both timestamps are valid and
-  every business leaf merged safely, the later timestamp selects that matching
-  audit bundle. The engine records unresolved files/fields with a handoff and
+  ordering changes stay hard conflicts. Only direct `record.updatedAt`,
+  `record.updatedBy*` and `record.revision` are audit metadata: when both
+  timestamps are valid and every business leaf merged safely, the later
+  timestamp selects that matching audit bundle. `record.revision` is the write
+  revision an App's data port stores anew with every write (a random value or
+  an operation id, never a counter); it travels with `updatedAt`, so a writer
+  that sets it also sets `updatedAt` (ISO with milliseconds), or two
+  concurrent edits of different fields stay a conflict on `/record/revision`.
+  When both sides replaced the revision with new values, the merged record
+  gets a new one, `merge-<sha256 of a JSON array of the two revisions, sorted
+  by code point>`, never either side's, and equal timestamps pick the audit
+  bundle by the order of the two revisions. When the record carries a revision
+  but a side kept the base's or has none, that side's revision does not name
+  its content, so the merge is refused on `/record/revision`.
+  The engine records unresolved files/fields with a handoff and
   refuses further writes and publishes until `conflict --abort` (the commit
   returns to the draft), `finish-send --head <sha>` (retries the integration),
   or a conscious `conflict --resolved`. The checkout always stays on the local
